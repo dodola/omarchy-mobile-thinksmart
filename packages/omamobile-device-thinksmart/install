@@ -1,0 +1,25 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Staging only: no service commands, device access or firmware copies.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+destination=${1:?Usage: ./install DESTDIR}
+[[ $destination == /* && $destination != / ]] || { echo 'Use an absolute staging directory' >&2; exit 1; }
+install -Dm755 bin/omamobile-thinksmart-setup-user "$destination/usr/bin/omamobile-thinksmart-setup-user"
+while IFS= read -r -d '' file; do
+  install -Dm644 "$file" "$destination/usr/lib/${file#vendor/}"
+done < <(find vendor -type f -print0)
+install -Dm644 etc/omamobile-mirrorlist "$destination/etc/pacman.d/omamobile-mirrorlist"
+install -Dm644 hypr/safe.lua "$destination/usr/share/omamobile/thinksmart/safe.lua"
+install -Dm644 device.conf "$destination/usr/share/omamobile/device.conf"
+install -Dm644 version "$destination/usr/share/omamobile/device-thinksmart/version"
+install -Dm644 LICENSE "$destination/usr/share/licenses/omamobile-device-thinksmart/LICENSE"
+# Masks are policy only; installation never starts or stops a service.
+for unit in sleep suspend hibernate hybrid-sleep suspend-then-hibernate; do
+  install -d "$destination/etc/systemd/system"
+  ln -s /dev/null "$destination/etc/systemd/system/$unit.target"
+done
+for unit in omamobile-sleepd omamobile-doubletap; do
+  install -d "$destination/etc/systemd/user"
+  ln -s /dev/null "$destination/etc/systemd/user/$unit.service"
+done

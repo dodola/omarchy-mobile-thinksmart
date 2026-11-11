@@ -1,0 +1,131 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Real filesystem/MBR/cpio integration, no mounts, root, target binaries or device.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+for cmd in python3 dtc fdtget debugfs mke2fs e2fsck cpio; do
+  command -v "$cmd" >/dev/null || { echo "skip: missing $cmd"; exit 0; }
+done
+t=$(mktemp -d)
+trap 'rm -rf "$t"' EXIT
+fail() { echo "not ok - $*" >&2; cat "$t/log" >&2; exit 1; }
+mkdir -p "$t/tree/usr/lib/systemd" "$t/tree/usr/share/omamobile" "$t/tree/usr/lib/modules/6.19.5-test"
+printf '#!/bin/sh\n' > "$t/tree/usr/lib/systemd/systemd"
+chmod +x "$t/tree/usr/lib/systemd/systemd"
+echo fixture > "$t/tree/usr/lib/modules/6.19.5-test/modules.dep"
+cp device/thinksmart/device.conf "$t/tree/usr/share/omamobile/device.conf"
+truncate -s 24M "$t/rootfs.img"
+mke2fs -q -t ext4 -L omamobile-root -d "$t/tree" "$t/rootfs.img"
+echo '/dts-v1/; / { compatible = "lenovo,cd-18781y", "qcom,apq8053"; };' > "$t/board.dts"
+dtc -q -I dts -O dtb -o "$t/board.dtb" "$t/board.dts"
+cp device/thinksmart/kernel.config "$t/config"
+# A synthetic ARM64 Image + ELF represent architecture and ABI inputs.
+# They never execute. Filesystems and all output structure are real.
+python3 - "$t" <<'PY'
+import gzip, pathlib, struct, sys
+p = pathlib.Path(sys.argv[1])
+k = bytearray(64); k[56:60] = b'ARM\x64'
+(p/'Image.gz').write_bytes(gzip.compress(k + b'Linux version 6.19.5-test (fixture)\0', mtime=0))
+b = bytearray(120); b[:6] = b'\x7fELF\x02\x01'
+struct.pack_into('<H', b, 16, 2)
+struct.pack_into('<H', b, 18, 183)
+struct.pack_into('<Q', b, 24, 0x400040)
+struct.pack_into('<Q', b, 32, 64)
+struct.pack_into('<HH', b, 54, 56, 1)
+struct.pack_into('<IIQQQQQQ', b, 64, 1, 5, 0, 0x400000, 0x400000, 120, 120, 4096)
+(p/'busybox').write_bytes(b)
+PY
+args=(--kernel "$t/Image.gz" --dtb "$t/board.dtb" --config "$t/config" --rootfs "$t/rootfs.img" --busybox "$t/busybox")
+input_hash=$(sha256sum "$t/rootfs.img")
+tools/build-thinksmart-image "${args[@]}" --out "$t/output" > "$t/log" 2>&1 || fail 'builds image'
+[[ $(sha256sum "$t/rootfs.img") == "$input_hash" ]] || fail 'rootfs input unchanged'
+(cd "$t/output" && sha256sum -c SHA256SUMS) > "$t/checks"
+python3 - "$t" <<'PY'
+import gzip, json, pathlib, struct, sys
+p = pathlib.Path(sys.argv[1]); image = p/'output/system.img'
+with image.open('rb') as s:
+    m = s.read(512); assert m[510:] == b'\x55\xaa'
+    first = struct.unpack_from('<B3sB3sII', m, 446)
+    second = struct.unpack_from('<B3sB3sII', m, 462)
+    assert first[2] == second[2] == 0x83
+    assert first[-2:] == (2048, 509952)
+    assert second[-2:] == (512000, (24*1024*1024)//512)
+    s.seek(second[-2] * 512)
+    assert s.read() == (p/'rootfs.img').read_bytes()
+    s.seek(2048 * 512)
+    (p/'boot.ext2').write_bytes(s.read(509952*512))
+manifest = json.loads((p/'output/MANIFEST.json').read_text())
+assert manifest['kernel_release'] == '6.19.5-test'
+assert manifest['default_entry'] == 'diagnostic'
+assert not manifest['private_firstboot_included']
+assert (p/'output').stat().st_mode & 0o777 == 0o700
+raw = gzip.decompress((p/'output/boot/initramfs.cpio.gz').read_bytes())
+pos = 0; files = {}
+while True:
+    assert raw[pos:pos+6] == b'070701'
+    fields = [int(raw[pos+6+i*8:pos+14+i*8],16) for i in range(13)]
+    size, namesize = fields[6], fields[11]
+    start = pos+110
+    name = raw[start:start+namesize-1].decode()
+    start = (start+namesize+3)&~3
+    if name == 'TRAILER!!!': break
+    files[name] = raw[start:start+size]
+    pos = (start+size+3)&~3
+assert files['etc/thinksmart-layout'] == b'ROOT_SECTORS=49152\n'
+assert files['bin/sh'] == b'busybox'
+assert files['init'] == pathlib.Path('device/thinksmart/initramfs/init').read_bytes()
+assert files['guard'] == pathlib.Path('device/thinksmart/initramfs/guard').read_bytes()
+assert 'etc/thinksmart-firstboot.conf' not in files
+PY
+e2fsck -fn "$t/boot.ext2" > "$t/log" 2>&1 || fail 'boot filesystem is consistent'
+debugfs -R 'cat /extlinux/extlinux.conf' "$t/boot.ext2" > "$t/extlinux" 2> "$t/log"
+grep -qx 'DEFAULT diagnostic' "$t/extlinux" || fail 'diagnostic is default'
+echo 'ok - real nested filesystems, exact root bytes, default diagnostic boot, newc ownership and checksums'
+
+reject() {
+  local expected=$1; shift
+  if tools/build-thinksmart-image "${args[@]}" "$@" > "$t/log" 2>&1; then fail "accepted $expected"; fi
+  grep -qF -- "$expected" "$t/log" || fail "wrong rejection for $expected"
+  [[ ! -e $t/rejected ]] || fail 'failed preflight published output'
+}
+reject 'existing output' --out "$t/output"
+reject 'regular file' --rootfs /dev/null --out "$t/rejected"
+sed '/CONFIG_MMC_SDHCI_MSM=y/d' "$t/config" > "$t/bad-config"
+reject 'CONFIG_MMC_SDHCI_MSM' --config "$t/bad-config" --out "$t/rejected"
+echo '/dts-v1/; / { compatible = "other,board", "qcom,apq8053"; };' > "$t/board.dts"
+dtc -q -I dts -O dtb -o "$t/other.dtb" "$t/board.dts"
+reject 'not a Lenovo' --dtb "$t/other.dtb" --out "$t/rejected"
+cp "$t/busybox" "$t/dynamic"
+python3 - "$t/dynamic" <<'PY'
+import pathlib, struct, sys
+p=pathlib.Path(sys.argv[1]); data=bytearray(p.read_bytes()); struct.pack_into('<I',data,64,3); p.write_bytes(data)
+PY
+reject 'statically linked' --busybox "$t/dynamic" --out "$t/rejected"
+python3 - "$t" <<'PY'
+import pathlib, struct, sys
+p=pathlib.Path(sys.argv[1]); data=bytearray((p/'busybox').read_bytes())
+data.extend(bytes(88))
+struct.pack_into('<H', data, 16, 3)
+struct.pack_into('<H', data, 56, 2)
+struct.pack_into('<IIQQQQQQ', data, 64, 1, 5, 0, 0x400000, 0x400000, 208, 208, 4096)
+struct.pack_into('<IIQQQQQQ', data, 120, 2, 6, 176, 0x4000b0, 0x4000b0, 32, 32, 8)
+struct.pack_into('<QQ', data, 176, 1, 1)
+(p/'needed').write_bytes(data)
+struct.pack_into('<Q', data, 24, 0)
+(p/'library').write_bytes(data)
+PY
+reject 'dynamic dependencies' --busybox "$t/needed" --out "$t/rejected"
+reject 'no executable entrypoint' --busybox "$t/library" --out "$t/rejected"
+debugfs -w -R 'rm /usr/lib/modules/6.19.5-test/modules.dep' "$t/rootfs.img" > "$t/log" 2>&1
+reject 'modules.dep' --out "$t/rejected"
+# A valid-looking sparse ext4 superblock claiming a filesystem above capacity
+# is rejected without reading or allocating that many gigabytes.
+python3 - "$t" <<'PY'
+import pathlib, struct, sys
+p=pathlib.Path(sys.argv[1]); data=bytearray((p/'rootfs.img').read_bytes()[:2048])
+size=8*1024**3; blocksize=1024 << struct.unpack_from('<I', data, 1024+24)[0]
+struct.pack_into('<I', data, 1024+4, size//blocksize)
+with (p/'large.img').open('wb') as f: f.write(data); f.truncate(size)
+PY
+reject 'exceeds the reference system partition' --rootfs "$t/large.img" --out "$t/rejected"
+echo 'ok - refuses devices, wrong board, missing early driver, dynamic init, module mismatch, oversized root and overwrite'

@@ -1,0 +1,51 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Staging and user-profile checks, without systemd or device access.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+fail() { echo "not ok - $*" >&2; exit 1; }
+t=$(mktemp -d)
+trap 'rm -rf "$t"' EXIT
+./install "$t/stage"
+for unit in sleep suspend hibernate hybrid-sleep suspend-then-hibernate; do
+  [[ $(readlink "$t/stage/etc/systemd/system/$unit.target") == /dev/null ]] || fail "masked $unit"
+done
+for unit in omamobile-sleepd omamobile-doubletap; do
+  [[ $(readlink "$t/stage/etc/systemd/user/$unit.service") == /dev/null ]] || fail "masked $unit"
+done
+[[ ! -e $t/stage/usr/bin/omamobile-bootctl ]] || fail 'no bootctl'
+[[ ! -e $t/stage/usr/lib/firmware ]] || fail 'no firmware'
+[[ -f $t/stage/etc/pacman.d/omamobile-mirrorlist ]] || fail 'repository mirrorlist'
+cmp -s device.conf "$t/stage/usr/share/omamobile/device.conf" || fail 'installed device identity'
+grep -qx 'CODENAME=thinksmart' "$t/stage/usr/share/omamobile/device.conf" || fail 'ThinkSmart identity'
+if [[ -f ../../device/thinksmart/device.conf ]]; then
+  cmp -s device.conf ../../device/thinksmart/device.conf || fail 'descriptor copy drifted'
+fi
+rule=$t/stage/usr/lib/udev/rules.d/10-omamobile-thinksmart-storage.rules
+grep -qF 'KERNEL=="mmcblk[0-9]*"' "$rule" || fail 'eMMC including boot partitions guarded'
+grep -qF 'blockdev --setro /dev/%k' "$rule" || fail 'read-only policy'
+grep -qF -- '--setrw' "$rule" && fail 'no write exceptions'
+echo 'ok - package stages eMMC protection and masks without touching the host'
+
+export HOME=$t/home
+mkdir -p "$HOME/.config/hypr" "$HOME/.config/omarchy"
+printf 'local omarchy_monitor_scale = 3\nlocal omarchy_gdk_scale = 3\n' > "$HOME/.config/hypr/monitors.lua"
+echo '-- custom user setting' > "$HOME/.config/hypr/looknfeel.lua"
+echo '{"idle":{"screensaver":150,"lock":300,"custom_idle":7},"custom":42}' > "$HOME/.config/omarchy/shell.json"
+bin/omamobile-thinksmart-setup-user
+grep -qx 'local omarchy_monitor_scale = 1' "$HOME/.config/hypr/monitors.lua" || fail 'native monitor scale'
+grep -qx 'local omarchy_gdk_scale = 1' "$HOME/.config/hypr/monitors.lua" || fail 'matching GTK scale'
+sed -i 's/monitor_scale = 1/monitor_scale = 1.25/' "$HOME/.config/hypr/monitors.lua"
+bin/omamobile-thinksmart-setup-user
+grep -qx 'local omarchy_monitor_scale = 1.25' "$HOME/.config/hypr/monitors.lua" || fail 'preserves later user scale'
+[[ $(grep -cF 'dofile("/usr/share/omamobile/thinksmart/safe.lua")' "$HOME/.config/hypr/looknfeel.lua") == 1 ]] || fail 'one key override'
+python3 - "$HOME" <<'PY'
+import json, pathlib, sys
+home = pathlib.Path(sys.argv[1])
+config = json.loads((home / '.config/omarchy/shell.json').read_text())
+assert config['custom'] == 42
+assert config['idle'] == {'screensaver': 0, 'lock': 0, 'custom_idle': 7}
+for name in ('suspend-off', 'screensaver-off'):
+    assert (home / '.local/state/omarchy/toggles' / name).is_file()
+PY
+echo 'ok - first-light profile seeds native scale once and disables idle blanking'

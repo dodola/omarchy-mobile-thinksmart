@@ -15,6 +15,8 @@
 #   rootfs/packages.omamobile  ours, from out/repo (tools/build-packages), plus
 #                              the device package and the board's own ones
 #                              (PACKAGE and ROOTFS_PACKAGES in device.conf)
+#                              minus ROOTFS_OMAMOBILE_SKIP (explicit shared
+#                              requests only; dependencies remain required)
 # then adds the [omamobile] repository itself (a copy in
 # /var/lib/omamobile/repo), sets the [omamobile] channel the phone follows
 # (--channel), and the kernel modules from the current kernel build. A
@@ -109,10 +111,19 @@ conf=device/$DEVICE/device.conf
 DEVICE_PACKAGE=$(sed -n 's/^PACKAGE=\([a-z0-9-]*\)$/\1/p' "$conf")
 [[ -n $DEVICE_PACKAGE ]] || alarm_die "$conf has no PACKAGE"
 ROOTFS_PACKAGES=$(sed -n 's/^ROOTFS_PACKAGES="\(.*\)"$/\1/p' "$conf")
+ROOTFS_OMAMOBILE_SKIP=$(sed -n 's/^ROOTFS_OMAMOBILE_SKIP="\(.*\)"$/\1/p' "$conf")
 # Boot files in the device package: the kernel comes as a package
 KERNEL_PACKAGE=0
 grep -c 'OMAMOBILE_BOOT_FILES' "packages/$DEVICE_PACKAGE/install" >/dev/null 2>&1 && KERNEL_PACKAGE=1
 [[ $ROOTFS_PACKAGES =~ ^[a-z0-9\ -]*$ ]] || alarm_die "$conf: ROOTFS_PACKAGES may hold only package names"
+[[ $ROOTFS_OMAMOBILE_SKIP =~ ^[a-z0-9\ -]*$ ]] || alarm_die "$conf: ROOTFS_OMAMOBILE_SKIP may hold only package names"
+# This removes explicit requests, not packages selected by dependencies or
+# repository priority. In particular it cannot select an alternative Mesa.
+for package in $ROOTFS_OMAMOBILE_SKIP; do
+  [[ $package =~ ^[a-z0-9][a-z0-9-]*$ ]] || alarm_die "$conf: invalid skipped package name $package"
+  [[ $package != mesa ]] || alarm_die "$conf: mesa cannot be skipped; the shared Mesa must support this GPU"
+  grep -qxF -- "$package" rootfs/packages.omamobile || alarm_die "$conf: ROOTFS_OMAMOBILE_SKIP names unknown shared package $package"
+done
 
 repo=$outrel/repo/aarch64
 [[ -f $repo/omamobile.db ]] ||
@@ -150,6 +161,7 @@ docker run --rm --privileged --platform linux/arm64 \
   -v "$volume:/target" -v "$work:/out" -v "$ALARM_CACHE/pkg:/var/cache/pacman/pkg" \
   -e VERSION="$VERSION" -e DEVICE="$DEVICE" -e DEVICE_PACKAGE="$DEVICE_PACKAGE" \
   -e ROOTFS_PACKAGES="$ROOTFS_PACKAGES" -e KERNEL_PACKAGE="$KERNEL_PACKAGE" \
+  -e ROOTFS_OMAMOBILE_SKIP="$ROOTFS_OMAMOBILE_SKIP" \
   -e KERNEL_RELEASE="$release" -e MODULES_SHA256="$(sha256sum < "$modules" | cut -d' ' -f1)" \
   -e GIT_COMMIT="$commit" -e ALARM_SHA256="$(sha256sum < "$ALARM_TARBALL" | cut -d' ' -f1)" \
   -e OMARCHY_CHANNEL="$OMARCHY_CHANNEL" -e CHANNEL="$CHANNEL" -e ALLOW_MISSING="$ALLOW_MISSING" \

@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Keep this port on its own offline package set until release qualification.
+Server = file:///var/lib/omamobile/repo/$arch
+#Server = https://pkgs.omamobile.org/stable/$arch
+#Server = https://pkgs.omamobile.org/development/$arch

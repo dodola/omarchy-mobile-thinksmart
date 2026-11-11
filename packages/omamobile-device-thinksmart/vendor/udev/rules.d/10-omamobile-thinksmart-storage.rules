@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: MIT
+# No writable eMMC exception exists for this offline port. The initramfs
+# must establish protection first; these rules retain it after switch_root.
+# Matches whole disks, partitions and the eMMC boot devices. No setrw path.
+SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{UDISKS_IGNORE}="1"
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ATTR{ro}=="0", RUN+="/usr/bin/blockdev --setro /dev/%k"

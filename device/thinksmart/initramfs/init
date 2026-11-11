@@ -1,0 +1,92 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Experimental lk2nd handoff: eMMC stays read-only, changes live in RAM.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t proc proc /proc || exit 1
+mount -t sysfs sysfs /sys || exit 1
+mount -t devtmpfs devtmpfs /dev || exit 1
+exec </dev/console >/dev/console 2>&1
+mkdir -p /run /dev/pts /lower /newroot
+mount -t tmpfs -o mode=0755 tmpfs /run || exit 1
+mount -t devpts devpts /dev/pts || exit 1
+
+say() { echo "omamobile-thinksmart: $*"; }
+stop() {
+    say "$*; STOPPED, no reboot or storage recovery is attempted"
+    while :; do sleep 60; done
+}
+
+# Also used after switch_root. It has its own static executable in /run,
+# so switch_root removing the initramfs cannot remove the guard's tools.
+mkdir -p /run/omamobile-thinksmart
+cp /bin/busybox /run/omamobile-thinksmart/busybox || exit 1
+cp /guard /run/omamobile-thinksmart/guard || exit 1
+/guard once || stop 'storage protection failed'
+
+# Watch late arrivals while waiting for eMMC. No device manager or module
+# loader runs until every visible block device has been protected.
+/guard &
+early_guard=$!
+say "experimental read-only boot, kernel $(uname -r)"
+case " $(cat /proc/cmdline) " in
+    *' omamobile.initramfs '*)
+        say 'diagnostic shell; every block device is read-only'
+        while :; do /bin/sh </dev/console >/dev/console 2>&1; sleep 1; done
+        ;;
+esac
+
+system=''
+for attempt in $(seq 1 30); do
+    count=0
+    for entry in /sys/class/block/mmcblk*/uevent; do
+        [ -r "$entry" ] || continue
+        if grep -qx 'PARTNAME=system' "$entry"; then
+            # uevent is data, never shell input.
+            name=${entry%/uevent}; name=${name##*/}
+            system=/dev/$name
+            count=$((count + 1))
+        fi
+    done
+    [ "$count" -le 1 ] || stop 'more than one eMMC system partition'
+    [ "$count" = 1 ] && break
+    sleep 1
+done
+[ -b "$system" ] || stop 'no eMMC system partition'
+/guard once || stop 'eMMC protection failed'
+[ "$(blockdev --getro "$system")" = 1 ] || stop 'system is writable'
+
+# Only a nested image with the exact geometry produced by the offline
+# packer can be used. Never interpret the outer eMMC as an MBR image.
+. /etc/thinksmart-layout
+[ "$(od -An -tx2 -j 510 -N 2 "$system" | tr -d ' \n')" = aa55 ] || stop 'nested MBR signature missing'
+set -- $(od -An -tu4 -j 470 -N 8 "$system")
+[ "$#" = 2 ] && [ "$1" = 512000 ] && [ "$2" = "$ROOT_SECTORS" ] || stop 'nested root geometry differs'
+loop=$(losetup -f) || stop 'no free loop device'
+losetup -r -o 262144000 --sizelimit "$((ROOT_SECTORS * 512))" "$loop" "$system" || stop 'read-only root mapping failed'
+[ "$(blockdev --getro "$loop")" = 1 ] || stop 'loop is writable'
+mount -t ext4 -o ro,noload "$loop" /lower || stop 'root mount failed'
+[ -x /lower/usr/lib/systemd/systemd ] || stop 'root has no systemd'
+
+# The disk's journal is never replayed. The overlay has a bounded RAM
+# budget on this 2 GiB board and is discarded at power loss.
+mkdir -p /run/overlay
+mount -t tmpfs -o size=512m,mode=0755 tmpfs /run/overlay || stop 'RAM overlay unavailable'
+mkdir -p /run/overlay/upper /run/overlay/work
+mount -t overlay overlay -o lowerdir=/lower,upperdir=/run/overlay/upper,workdir=/run/overlay/work /newroot || stop 'overlay mount failed'
+mkdir -p /newroot/run /newroot/proc /newroot/sys /newroot/dev
+if [ -f /etc/thinksmart-firstboot.conf ]; then
+    mkdir -p /newroot/etc/omamobile
+    cp /etc/thinksmart-firstboot.conf /newroot/etc/omamobile/firstboot.conf || stop 'firstboot configuration failed'
+    chmod 600 /newroot/etc/omamobile/firstboot.conf
+fi
+mount --move /run /newroot/run || stop 'run handoff failed'
+mount --move /proc /newroot/proc || exit 1
+mount --move /sys /newroot/sys || exit 1
+mount --move /dev /newroot/dev || exit 1
+
+# Start and verify the guard in its final root before retiring the early
+# watcher. It scans the merged root's sysfs and devtmpfs after handoff.
+chroot /newroot /run/omamobile-thinksmart/busybox sh /run/omamobile-thinksmart/guard once || exit 1
+chroot /newroot /run/omamobile-thinksmart/busybox sh /run/omamobile-thinksmart/guard &
+kill "$early_guard"
+exec switch_root /newroot /usr/lib/systemd/systemd

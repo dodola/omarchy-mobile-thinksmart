@@ -1,0 +1,51 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Apply the tablet's conservative first-light profile before login."""
+import json
+from pathlib import Path
+import re
+
+home = Path.home()
+state = home / ".local/state/omarchy"
+config = home / ".config"
+
+
+def write(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".thinksmart-new")
+    temporary.write_text(content)
+    temporary.replace(path)
+
+
+# Seed scale once. Subsequent user choices survive each login.
+marker = state / "done/omamobile-thinksmart-scale"
+monitors = config / "hypr/monitors.lua"
+if not marker.exists() and monitors.is_file():
+    text = monitors.read_text()
+    for variable in ("omarchy_monitor_scale", "omarchy_gdk_scale"):
+        text = re.sub(r"(?m)^local " + variable + r" = .*?$",
+                      "local " + variable + " = 1", text)
+    write(monitors, text)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+# During bring-up the panel stays lit: disable automatic lock/blanking, and
+# leave suspend hidden. No display, backlight or hardware commands run here.
+shell = config / "omarchy/shell.json"
+if shell.is_file():
+    data = json.loads(shell.read_text())
+    data.setdefault("idle", {}).update(screensaver=0, lock=0)
+    write(shell, json.dumps(data, indent=2) + "\n")
+toggles = state / "toggles"
+toggles.mkdir(parents=True, exist_ok=True)
+for name in ("suspend-off", "screensaver-off"):
+    (toggles / name).touch()
+
+# The phone profile was appended by omamobile-setup-user. Load our key
+# override last without replacing any user configuration.
+look = config / "hypr/looknfeel.lua"
+line = 'dofile("/usr/share/omamobile/thinksmart/safe.lua")'
+if look.is_file():
+    text = look.read_text()
+    if line not in text.splitlines():
+        write(look, text.rstrip() + "\n\n" + line + "\n")

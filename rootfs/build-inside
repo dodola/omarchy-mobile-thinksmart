@@ -7,7 +7,8 @@
 #   /modules  the kernel modules tarball (read-only)
 #   /target   an empty volume: the root file system is assembled here
 #   /out      where the raw image and the MANIFEST go
-# Environment: VERSION, DEVICE, DEVICE_PACKAGE, ROOTFS_PACKAGES and
+# Environment: VERSION, DEVICE, DEVICE_PACKAGE, ROOTFS_PACKAGES,
+# ROOTFS_OMAMOBILE_SKIP (explicit shared requests omitted for this board), and
 # ALLOW_MISSING (both space-separated), KERNEL_PACKAGE (1: the device
 # package ships boot files, so linux-omamobile and omamobile-boot-update go
 # in and the package's modules replace the tarball), KERNEL_RELEASE, MODULES_SHA256,
@@ -33,6 +34,12 @@ source /src/rootfs/resolve.sh
 
 mapfile -t base < <(list /src/rootfs/packages.base)
 mapfile -t ours < <(list /src/rootfs/packages.omamobile)
+read -ra omit <<<"${ROOTFS_OMAMOBILE_SKIP:-}"
+selected=()
+for p in "${ours[@]}"; do
+  [[ " ${omit[*]} " == *" $p "* ]] || selected+=("$p")
+done
+ours=("${selected[@]}")
 ours+=("$DEVICE_PACKAGE")
 read -ra board <<<"${ROOTFS_PACKAGES:-}"
 ours+=("${board[@]}")
@@ -225,6 +232,7 @@ say "MANIFEST"
   echo "omarchy packages not built for aarch64: ${unavailable[*]:-none}"
   echo "omarchy packages skipped: ${skip[*]:-none}"
   echo "omamobile packages missing (allowed): ${skipped_ours[*]:-none}"
+  echo "omamobile packages skipped for device: ${omit[*]:-none}"
   echo
   echo "# packages (name version repository)"
   pacman -Sl > /tmp/sync-list

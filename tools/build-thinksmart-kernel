@@ -1,0 +1,107 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Build the experimental ThinkSmart kernel offline in an isolated output tree.
+# Requires an already downloaded, clean, pinned msm8953-mainline Linux checkout.
+# No downloads, installation, signing, device commands or publishing.
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+SOURCE= OUTPUT= JOBS=1 CONFIG_ONLY=0
+PINNED=770e10fa15a00051eaef862e4cb2724f2f8fa568
+usage() {
+    cat <<'EOF'
+Usage: tools/build-thinksmart-kernel --source KERNEL_DIR --out EMPTY_DIR [--jobs N] [--config-only]
+
+Builds Linux v6.19.5-r0 from msm8953-mainline/linux with LLVM, W=1, and the
+ThinkSmart early-boot config. Run inside your own ARM64-capable LLVM build
+environment. KERNEL_DIR must be a clean Git checkout of the pinned revision;
+EMPTY_DIR must be outside it and empty. The source directory is not modified.
+LLVM selects the LLVM tool suffix/path (default 1; for example LLVM=-18).
+--config-only validates configuration without compiling the kernel.
+
+Outputs under EMPTY_DIR:
+  arch/arm64/boot/Image.gz
+  arch/arm64/boot/dts/qcom/apq8053-lenovo-cd-18781y.dtb
+  modules/lib/modules/<kernel-release>/
+  modules-<kernel-release>.tar.zst (for tools/build-rootfs)
+  .config, kernel.release, thinksmart-source.txt
+
+This does not copy vendor firmware, apply the optional microphone patch, or
+validate hardware. See device/thinksmart/BRINGUP-PLAN.md before using a build.
+EOF
+}
+die() { printf 'build-thinksmart-kernel: %s\n' "$*" >&2; exit 1; }
+while (($#)); do
+    case $1 in
+        --source) SOURCE=${2:?--source needs KERNEL_DIR}; shift ;;
+        --out) OUTPUT=${2:?--out needs EMPTY_DIR}; shift ;;
+        --jobs) JOBS=${2:?--jobs needs N}; shift ;;
+        --config-only) CONFIG_ONLY=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+    shift
+done
+[[ -n $SOURCE && -n $OUTPUT ]] || { usage >&2; exit 1; }
+[[ $JOBS =~ ^[1-9][0-9]*$ ]] || die '--jobs must be a positive integer'
+for cmd in git make realpath find tar zstd; do
+    command -v "$cmd" >/dev/null || die "missing host command: $cmd"
+done
+SOURCE=$(realpath -e -- "$SOURCE")
+OUTPUT=$(realpath -m -- "$OUTPUT")
+[[ -f $SOURCE/Makefile && -f $SOURCE/arch/arm64/configs/msm8953.config ]] \
+    || die 'source is not the expected ARM64 MSM8953 kernel tree'
+[[ $(git -C "$SOURCE" rev-parse --show-toplevel) == "$SOURCE" ]] \
+    || die 'source must be the root of a Git checkout'
+[[ $(git -C "$SOURCE" rev-parse HEAD) == "$PINNED" ]] \
+    || die "source must be v6.19.5-r0 ($PINNED); use a separate checkout"
+[[ -z $(git -C "$SOURCE" status --porcelain --untracked-files=all) ]] \
+    || die 'source has local files or changes; use a clean dedicated checkout'
+case "$OUTPUT/" in
+    "$SOURCE/"*|/dev/*|/proc/*|/sys/*) die 'output must be outside the source and device filesystems' ;;
+esac
+[[ ! -e $OUTPUT || -d $OUTPUT ]] || die 'output is not a directory'
+if [[ -d $OUTPUT && -n $(find "$OUTPUT" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+    die 'output must be empty; choose a new directory for this build'
+fi
+mkdir -p -- "$OUTPUT"
+KMAKE=(make -C "$SOURCE" O="$OUTPUT" ARCH=arm64 LLVM="${LLVM:-1}" W=1)
+"${KMAKE[@]}" defconfig
+bash "$SOURCE/scripts/kconfig/merge_config.sh" -m -O "$OUTPUT" \
+    "$OUTPUT/.config" "$SOURCE/arch/arm64/configs/msm8953.config" \
+    "$ROOT/device/thinksmart/kernel.config"
+"${KMAKE[@]}" olddefconfig
+# Fail before compiling if dependencies silently removed an early-boot option.
+while IFS= read -r setting; do
+    case $setting in
+        CONFIG_*=*|'# CONFIG_'*' is not set')
+            if ! grep -qxF -- "$setting" "$OUTPUT/.config"; then
+                die "required config did not survive olddefconfig: $setting"
+            fi
+            ;;
+    esac
+done < "$ROOT/device/thinksmart/kernel.config"
+if ((CONFIG_ONLY)); then
+    printf 'Validated ThinkSmart kernel configuration in %s (no kernel built).\n' "$OUTPUT"
+    exit 0
+fi
+"${KMAKE[@]}" -j"$JOBS" Image.gz modules qcom/apq8053-lenovo-cd-18781y.dtb
+"${KMAKE[@]}" INSTALL_MOD_PATH="$OUTPUT/modules" INSTALL_MOD_STRIP=1 modules_install
+[[ -s $OUTPUT/arch/arm64/boot/Image.gz &&
+   -s $OUTPUT/arch/arm64/boot/dts/qcom/apq8053-lenovo-cd-18781y.dtb ]] \
+    || die 'kernel or board DTB output missing'
+cp -- "$OUTPUT/include/config/kernel.release" "$OUTPUT/kernel.release"
+release=$(cat "$OUTPUT/kernel.release")
+[[ $release =~ ^[0-9]+(\.[0-9]+)+[[:alnum:]_.+-]*$ ]] || die 'invalid built kernel release'
+[[ -d $OUTPUT/modules/lib/modules/$release ]] || die 'matching module directory missing'
+# Build/source links point into this laptop and must not enter a root image.
+rm -f -- "$OUTPUT/modules/lib/modules/$release/build" "$OUTPUT/modules/lib/modules/$release/source"
+tar -C "$OUTPUT/modules/lib/modules" --owner=0 --group=0 --numeric-owner \
+    -cf - "$release" | zstd -q -3 -T1 -o "$OUTPUT/modules-$release.tar.zst"
+{
+    printf 'source=https://github.com/msm8953-mainline/linux\n'
+    printf 'tag=v6.19.5-r0\ncommit=%s\n' "$PINNED"
+    printf 'config=arm64 defconfig + arm64 msm8953.config + device/thinksmart/kernel.config\n'
+    printf 'hardware_tested=no\n'
+} > "$OUTPUT/thinksmart-source.txt"
+printf 'Built experimental kernel in %s (hardware untested).\n' "$OUTPUT"

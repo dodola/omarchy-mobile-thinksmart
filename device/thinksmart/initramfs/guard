@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# No writable allowlist. Protect disks as well as partitions and loop maps.
+if [ -x /run/omamobile-thinksmart/busybox ]; then
+    bb=/run/omamobile-thinksmart/busybox
+else
+    bb=/bin/busybox
+fi
+scan() {
+    for entry in /sys/class/block/mmcblk* /sys/class/block/sd* /sys/class/block/loop*; do
+        [ -r "$entry/ro" ] || continue
+        name=${entry##*/}
+        [ -b "/dev/$name" ] || continue
+        [ "$("$bb" cat "$entry/ro")" = 1 ] && continue
+        "$bb" blockdev --setro "/dev/$name" || return 1
+        [ "$("$bb" cat "$entry/ro")" = 1 ] || return 1
+    done
+}
+if [ "${1:-}" = once ]; then scan; exit $?; fi
+while :; do
+    if ! scan; then
+        # Halt in a kernel panic with no timeout. Stopping PID 1 alone
+        # would leave its children running. Human recovery is required;
+        # there is no automatic reboot or writable fallback.
+        echo 'omamobile-thinksmart: STORAGE GUARD FAILED; userspace stopped' >/dev/console
+        echo 0 >/proc/sys/kernel/panic
+        echo c >/proc/sysrq-trigger
+        while :; do "$bb" sleep 60; done
+    fi
+    "$bb" sleep 0.2
+done

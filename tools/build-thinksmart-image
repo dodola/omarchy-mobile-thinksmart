@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Assemble an experimental ThinkSmart lk2nd system image, without device access.
+
+Usage: tools/build-thinksmart-image --kernel Image.gz --dtb board.dtb
+    --config kernel.config --rootfs rootfs.img --busybox busybox-static
+    --out NEW_DIRECTORY [--firstboot-conf PRIVATE_FILE]
+
+Inputs must be regular files. The rootfs is the uncompressed ext4 artifact
+from tools/build-rootfs, with its matching kernel modules. busybox must be
+a static aarch64 executable with mount, loop, blockdev and switch_root
+applets. Output is a nested MBR image for an already reviewed lk2nd layout;
+it is NOT a whole-eMMC image. This tool never installs or flashes it.
+All block storage stays read-only at boot; the writable root is a 512 MiB
+RAM overlay. Provisioning and user changes disappear after power loss.
+"""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+BOOT_START, BOOT_SECTORS, ROOT_START = 2048, 509952, 512000
+SYSTEM_SECTORS = 14280671  # reference layout; hardware must be checked separately
+REQUIRED = (
+    "BLK_DEV_INITRD RD_GZIP DEVTMPFS PROC_FS SYSFS TMPFS TMPFS_XATTR "
+    "EXT4_FS OVERLAY_FS BLK_DEV_LOOP MSDOS_PARTITION EFI_PARTITION MMC MMC_BLOCK "
+    "MMC_SDHCI MMC_SDHCI_PLTFM MMC_SDHCI_MSM SERIAL_MSM SERIAL_MSM_CONSOLE VT VT_CONSOLE MAGIC_SYSRQ"
+).split()
+
+
+def fail(message):
+    raise ValueError(message)
+
+
+def regular(value):
+    path = Path(value).resolve(strict=True)
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise argparse.ArgumentTypeError(f"input must be a regular file: {value}")
+    return path
+
+
+def run(*command):
+    return subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE).stdout
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def check_busybox(path):
+    # Reject dynamically linked binaries: there is no dynamic loader in
+    # this initramfs. No target executable runs on the build host.
+    with path.open("rb") as stream:
+        header = stream.read(64)
+        if len(header) != 64 or header[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", header, 18)[0] != 183:
+            fail("--busybox must be a little-endian aarch64 ELF64 executable")
+        if struct.unpack_from("<H", header, 16)[0] not in (2, 3):
+            fail("--busybox must be an executable ELF file")
+        entry = struct.unpack_from("<Q", header, 24)[0]
+        offset = struct.unpack_from("<Q", header, 32)[0]
+        width, count = struct.unpack_from("<HH", header, 54)
+        if width != 56 or not count or offset + width * count > path.stat().st_size:
+            fail("invalid busybox ELF program headers")
+        segments = []
+        for _ in range(count):
+            stream.seek(offset + len(segments) * width)
+            segment = struct.unpack("<IIQQQQQQ", stream.read(width))
+            segments.append(segment)
+            kind, flags, start, address, _, filesz, memsz, _ = segment
+            if filesz > memsz or start + filesz > path.stat().st_size:
+                fail("busybox ELF segment is outside its file")
+            if kind == 3:
+                fail("--busybox must be statically linked (no PT_INTERP)")
+        if not any(kind == 1 and flags & 1 and address <= entry < address + filesz
+                   for kind, flags, _, address, _, filesz, _, _ in segments):
+            fail("busybox ELF has no executable entrypoint")
+        for kind, _, start, _, _, filesz, _, _ in segments:
+            if kind == 2:
+                if filesz % 16:
+                    fail("busybox ELF has an invalid dynamic section")
+                stream.seek(start)
+                for _ in range(filesz // 16):
+                    tag, _ = struct.unpack("<QQ", stream.read(16))
+                    if tag == 1:
+                        fail("--busybox has dynamic dependencies (DT_NEEDED)")
+                    if tag == 0:
+                        break
+
+
+def check_inputs(args):
+    config = dict(line.split("=", 1) for line in args.config.read_text().splitlines()
+                  if line.startswith("CONFIG_") and "=" in line)
+    absent = ["CONFIG_" + name for name in REQUIRED if config.get("CONFIG_" + name) != "y"]
+    if config.get("CONFIG_EXT2_FS") != "y" and config.get("CONFIG_EXT4_USE_FOR_EXT2") != "y":
+        absent.append("CONFIG_EXT2_FS or CONFIG_EXT4_USE_FOR_EXT2")
+    if absent:
+        fail("initramfs requires built-in drivers: " + ", ".join(absent))
+    banner = None
+    with gzip.open(args.kernel, "rb") as stream:
+        tail = stream.read(64)
+        if tail[56:60] != b"ARM\x64":
+            fail("--kernel must contain a gzip-compressed ARM64 Image")
+        # Verify gzip's CRC, including truncated input, before producing output.
+        while chunk := stream.read(1024 * 1024):
+            match = re.search(rb"Linux version ([A-Za-z0-9._+~-]+) ", tail + chunk)
+            if match:
+                banner = match.group(1).decode("ascii")
+            tail = chunk[-512:]
+    if not banner:
+        fail("kernel release banner is missing")
+    compatible = run("fdtget", "-t", "s", str(args.dtb), "/", "compatible").split()
+    if "lenovo,cd-18781y" not in compatible or "qcom,apq8053" not in compatible:
+        fail("--dtb is not a Lenovo CD-18781Y APQ8053 device tree")
+    check_busybox(args.busybox)
+    with args.rootfs.open("rb") as stream:
+        stream.seek(1024)
+        sb = stream.read(1024)
+    if len(sb) != 1024 or sb[56:58] != b"\x53\xef":
+        fail("--rootfs is not an ext4 filesystem")
+    if sb[120:136].rstrip(b"\0") != b"omamobile-root":
+        fail("--rootfs must have label omamobile-root (tools/build-rootfs)")
+    blocks = struct.unpack_from("<I", sb, 4)[0]
+    if struct.unpack_from("<I", sb, 96)[0] & 0x80:
+        blocks += struct.unpack_from("<I", sb, 336)[0] << 32
+    size = blocks * (1024 << struct.unpack_from("<I", sb, 24)[0])
+    if size != args.rootfs.stat().st_size or size % 512:
+        fail("rootfs is truncated, has trailing data, or is not sector-aligned")
+    if ROOT_START + size // 512 > SYSTEM_SECTORS:
+        fail("rootfs exceeds the reference system partition; use a smaller package set")
+    for name in ("/usr/lib/systemd/systemd", "/usr/share/omamobile/device.conf",
+                 f"/usr/lib/modules/{banner}/modules.dep"):
+        info = run("debugfs", "-R", "stat " + name, str(args.rootfs))
+        if "Inode:" not in info:
+            fail("rootfs missing " + name)
+    identity = run("debugfs", "-R", "cat /usr/share/omamobile/device.conf", str(args.rootfs))
+    if "CODENAME=thinksmart" not in identity.splitlines():
+        fail("rootfs must contain omamobile-device-thinksmart")
+    return size // 512, banner
+
+
+def archive(stage, destination):
+    # Deterministic root-owned newc, built on the host without cpio/root.
+    with destination.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as out:
+        def entry(name, mode, data, inode):
+            encoded = name.encode() + b"\0"
+            fields = (inode, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(encoded), 0)
+            header = b"070701" + b"".join(f"{v:08x}".encode() for v in fields)
+            out.write(header + encoded)
+            out.write(b"\0" * (-(110 + len(encoded)) % 4))
+            out.write(data)
+            out.write(b"\0" * (-len(data) % 4))
+        for index, path in enumerate(sorted(stage.rglob("*")), 1):
+            mode = path.lstat().st_mode
+            data = os.readlink(path).encode() if path.is_symlink() else path.read_bytes() if path.is_file() else b""
+            entry(str(path.relative_to(stage)), mode, data, index)
+        entry("TRAILER!!!", 0, b"", 0)
+
+
+def sparse_copy(source, output, offset):
+    # Keep multi-GiB ext4 fixtures and images sparse when supported.
+    with source.open("rb") as stream:
+        size = source.stat().st_size
+        position = 0
+        while position < size:
+            try:
+                begin = os.lseek(stream.fileno(), position, os.SEEK_DATA)
+                end = min(os.lseek(stream.fileno(), begin, os.SEEK_HOLE), size)
+            except OSError as error:
+                import errno
+                if error.errno == errno.ENXIO:
+                    break
+                if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+                    raise
+                begin, end = position, size
+            stream.seek(begin)
+            output.seek(offset + begin)
+            while begin < end:
+                data = stream.read(min(1024 * 1024, end - begin))
+                if not data:
+                    fail("input changed while copying")
+                output.write(data)
+                begin += len(data)
+            position = end
+
+
+def build(args, work, sectors, release):
+    stage, boot = work / "initramfs-tree", work / "boot"
+    for name in ("bin", "sbin", "etc", "proc", "sys", "dev", "run"):
+        (stage / name).mkdir(parents=True)
+    shutil.copyfile(args.busybox, stage / "bin/busybox")
+    (stage / "bin/busybox").chmod(0o755)
+    applets = "sh mount mkdir cat sleep losetup od tr grep seq cp chmod uname chroot kill switch_root blockdev"
+    for name in applets.split():
+        (stage / "bin" / name).symlink_to("busybox")
+    for name in ("init", "guard"):
+        shutil.copyfile(ROOT / "device/thinksmart/initramfs" / name, stage / name)
+        (stage / name).chmod(0o755)
+    (stage / "etc/thinksmart-layout").write_text(f"ROOT_SECTORS={sectors}\n")
+    if args.firstboot_conf:
+        shutil.copyfile(args.firstboot_conf, stage / "etc/thinksmart-firstboot.conf")
+        (stage / "etc/thinksmart-firstboot.conf").chmod(0o600)
+    (boot / "extlinux").mkdir(parents=True)
+    archive(stage, boot / "initramfs.cpio.gz")
+    shutil.rmtree(stage)
+    shutil.copyfile(args.kernel, boot / "Image.gz")
+    shutil.copyfile(args.dtb, boot / "apq8053-lenovo-cd-18781y.dtb")
+    (boot / "extlinux/extlinux.conf").write_text(
+        "DEFAULT diagnostic\nTIMEOUT 50\n\n"
+        "LABEL diagnostic\n  MENU LABEL Read-only initramfs diagnostics\n"
+        "  LINUX /Image.gz\n  INITRD /initramfs.cpio.gz\n"
+        "  FDT /apq8053-lenovo-cd-18781y.dtb\n"
+        "  APPEND console=tty0 console=ttyMSM0,115200n8 rdinit=/init panic=0 omamobile.initramfs\n\n"
+        "LABEL omamobile\n  MENU LABEL Experimental Omarchy Mobile (RAM overlay)\n"
+        "  LINUX /Image.gz\n  INITRD /initramfs.cpio.gz\n"
+        "  FDT /apq8053-lenovo-cd-18781y.dtb\n"
+        "  APPEND console=tty0 console=ttyMSM0,115200n8 rdinit=/init panic=0\n")
+    boot_image = work / "boot.ext2"
+    with boot_image.open("wb") as stream:
+        stream.truncate(BOOT_SECTORS * 512)
+    run("mke2fs", "-q", "-t", "ext2", "-b", "4096", "-L", "pmOS_boot", "-m", "0",
+        "-E", "root_owner=0:0", "-d", str(boot), str(boot_image))
+    run("e2fsck", "-fn", str(boot_image))
+    image = work / "system.img"
+    with image.open("wb") as stream:
+        stream.truncate((ROOT_START + sectors) * 512)
+        mbr = bytearray(512)
+        for number, start, count in ((0, BOOT_START, BOOT_SECTORS), (1, ROOT_START, sectors)):
+            struct.pack_into("<B3sB3sII", mbr, 446 + number * 16, 0, b"\xfe\xff\xff", 0x83,
+                             b"\xfe\xff\xff", start, count)
+        mbr[510:512] = b"\x55\xaa"
+        stream.write(mbr)
+        sparse_copy(boot_image, stream, BOOT_START * 512)
+        sparse_copy(args.rootfs, stream, ROOT_START * 512)
+    boot_image.unlink()
+    manifest = {"device": "thinksmart", "status": "experimental, not hardware tested",
+                "storage": "read-only eMMC; volatile 512 MiB root overlay",
+                "default_entry": "diagnostic", "boot_start": BOOT_START,
+                "boot_sectors": BOOT_SECTORS, "root_start": ROOT_START,
+                "root_sectors": sectors, "system_capacity_sectors": SYSTEM_SECTORS,
+                "kernel_release": release,
+                "private_firstboot_included": bool(args.firstboot_conf),
+                "inputs_sha256": {name: digest(getattr(args, name))
+                                  for name in ("kernel", "dtb", "config", "rootfs", "busybox")}}
+    (work / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (work / "SHA256SUMS").write_text("".join(
+        f"{digest(path)}  {path.relative_to(work)}\n"
+        for path in sorted(work.rglob("*")) if path.is_file()))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    for name in ("kernel", "dtb", "config", "rootfs", "busybox"):
+        parser.add_argument("--" + name, required=True, type=regular)
+    parser.add_argument("--firstboot-conf", type=regular,
+                        help="private firstboot.conf, embedded in the initramfs; keep output private")
+    parser.add_argument("--out", required=True, type=Path)
+    args = parser.parse_args()
+    out = args.out.resolve()
+    if out.exists() or args.out.is_symlink():
+        fail("--out must name a new directory; existing output is never overwritten")
+    if any(out == base or base in out.parents for base in (Path("/dev"), Path("/proc"), Path("/sys"))):
+        fail("--out cannot be a device or virtual filesystem path")
+    for command in ("fdtget", "debugfs", "mke2fs", "e2fsck"):
+        if not shutil.which(command):
+            fail("required host tool is missing: " + command)
+    sectors, release = check_inputs(args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".thinksmart-", dir=out.parent) as temp:
+        work = Path(temp) / "output"
+        work.mkdir(mode=0o700)
+        build(args, work, sectors, release)
+        if out.exists():
+            fail("output appeared during build; refusing to overwrite it")
+        work.rename(out)
+    print(f"Built {out / 'system.img'} (experimental; default is read-only diagnostics)")
+    print("No device accessed. Installation requires a reviewed device safety entry and human approval.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, EOFError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)

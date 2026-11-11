@@ -73,3 +73,7 @@ tests/module-load-once
 # don't meet in the same line
 echo "# tests/factory-index"   # the build index of Google's factory images, against a made-up zip
 tests/factory-index
+echo "# tests/thinksmart-rootfs"
+tests/thinksmart-rootfs
+echo "# tests/thinksmart-image"
+tests/thinksmart-image

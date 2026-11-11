@@ -1,0 +1,62 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Exercise the real host rootfs builder with a container stand-in: package
+# profile propagation and rejected profiles, without building or a phone.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+for tool in zstd flock; do command -v "$tool" >/dev/null || { echo "skip: no $tool"; exit 0; }; done
+fail() { echo "not ok - $*" >&2; cat "$t/log" >&2; exit 1; }
+t=$(mktemp -d)
+trap 'rm -rf "$t"' EXIT
+R=$t/repo
+mkdir -p "$R/tools/lib" "$R/device/thinksmart" "$R/rootfs" "$R/tests" "$R/keys/thinksmart" \
+  "$R/out/thinksmart/repo/aarch64" "$t/kernel/include/config" "$t/bin"
+cp tools/build-rootfs "$R/tools/"
+cp device/thinksmart/device.conf "$R/device/thinksmart/"
+cp rootfs/packages.omamobile "$R/rootfs/"
+touch "$R/keys/thinksmart/public.asc" "$R/out/thinksmart/repo/aarch64/omamobile.db" \
+  "$t/alarm.tar" "$t/kernel/modules-fixture.tar.zst"
+echo fixture > "$t/kernel/include/config/kernel.release"
+cat > "$R/tools/lib/alarm.sh" <<'SH'
+alarm_die() { echo "$*" >&2; exit 1; }
+alarm_say() { echo "$*"; }
+alarm_fetch() { :; }
+alarm_build_image() { echo fixture; }
+SH
+cat > "$t/bin/docker" <<'SH'
+#!/bin/bash
+set -euo pipefail
+[[ $1 == run ]] || exit 0
+work= skip=
+while (($#)); do
+  case $1 in
+    -v) [[ $2 != *:/out ]] || work=${2%:/out}; shift ;;
+    -e) [[ $2 != ROOTFS_OMAMOBILE_SKIP=* ]] || skip=${2#ROOTFS_OMAMOBILE_SKIP=}; shift ;;
+  esac
+  shift
+done
+echo "$skip" > "$T/profile"
+echo fixture > "$work/rootfs.img"
+echo fixture > "$work/MANIFEST"
+SH
+cat > "$R/tests/rootfs-smoke" <<'SH'
+#!/bin/bash
+set -euo pipefail
+zstd -qt "$1"
+SH
+chmod +x "$t/bin/docker" "$R/tests/rootfs-smoke"
+export T=$t PATH="$t/bin:$PATH" DEVICE=thinksmart KERNEL_OUT=$t/kernel
+export ALARM_CACHE=$t/cache ALARM_TARBALL=$t/alarm.tar OMARCHY_CHANNEL=stable
+"$R/tools/build-rootfs" --local thinksmart --version fixture > "$t/log" 2>&1 || fail 'local ThinkSmart rootfs'
+[[ $(cat "$t/profile") == vulkan-panfrost ]] || fail 'device profile reaches the container'
+[[ -f $R/out/thinksmart/omamobile-rootfs-thinksmart-fixture-aarch64.img.zst ]] || fail 'isolated output'
+for omit in mesa unknown-pkg 'bad;command'; do
+  sed "s/^ROOTFS_OMAMOBILE_SKIP=.*/ROOTFS_OMAMOBILE_SKIP=\"$omit\"/" device/thinksmart/device.conf > "$R/device/thinksmart/device.conf"
+  if "$R/tools/build-rootfs" --local thinksmart --version rejected > "$t/log" 2>&1; then
+    fail "accepted invalid omission $omit"
+  fi
+done
+grep -qF 'gallium-drivers=panfrost,freedreno,' packages/mesa/PKGBUILD || fail 'shared Mesa includes Freedreno'
+grep -qx 'BOOT_METHOD=lk2nd' device/thinksmart/device.conf || fail 'no Android install path'
+grep -qx 'UFS_RW=""' device/thinksmart/device.conf || fail 'no synthetic UFS permission'
+echo 'ok - local rootfs carries the device package profile and rejects unsafe or unknown omissions'

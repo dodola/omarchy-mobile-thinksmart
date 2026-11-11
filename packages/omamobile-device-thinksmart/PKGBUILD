@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+pkgname=omamobile-device-thinksmart
+pkgver=$(cat "${startdir:-.}/version")
+pkgrel=1
+pkgdesc="Offline bring-up policy for the Lenovo ThinkSmart View CD-18781Y"
+arch=(aarch64)
+url="https://github.com/derekross/omarchy-mobile"
+license=(MIT)
+# Older Omarchy Mobile Mesa builds omit Freedreno. Do not silently install
+# one merely because it has the same package name.
+depends=(bash python systemd util-linux 'mesa>=1:26.2.4-1.5')
+provides=(omamobile-device)
+conflicts=(omamobile-device)
+backup=(etc/pacman.d/omamobile-mirrorlist)
+
+package() {
+  "$startdir/install" "$pkgdir"
+}
+
+check() {
+  "$startdir/test/all"
+}
