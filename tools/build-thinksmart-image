@@ -5,14 +5,15 @@
 Usage: tools/build-thinksmart-image --kernel Image.gz --dtb board.dtb
     --config kernel.config --rootfs rootfs.img --busybox busybox-static
     --out NEW_DIRECTORY [--firstboot-conf PRIVATE_FILE]
+    [--persistence-mapper STATIC_AARCH64_MAPPER]
 
 Inputs must be regular files. The rootfs is the uncompressed ext4 artifact
 from tools/build-rootfs, with its matching kernel modules. busybox must be
-a static aarch64 executable with mount, loop, blockdev and switch_root
-applets. Output is a nested MBR image for an already reviewed lk2nd layout;
-it is NOT a whole-eMMC image. This tool never installs or flashes it.
-All block storage stays read-only at boot; the writable root is a 512 MiB
-RAM overlay. Provisioning and user changes disappear after power loss.
+a static aarch64 executable with mount, losetup (including -P), blockdev
+and switch_root applets. Output is a nested MBR image for an already
+reviewed lk2nd layout. This tool never installs or flashes the image.
+The default image uses a 512 MiB RAM overlay. With --persistence-mapper,
+an explicit boot entry uses an ext4 overlay in the tail of the system image.
 """
 import argparse
 import gzip
@@ -27,10 +28,11 @@ import struct
 import subprocess
 import sys
 import tempfile
+import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 BOOT_START, BOOT_SECTORS, ROOT_START = 2048, 509952, 512000
-SYSTEM_SECTORS = 14280671  # reference layout; hardware must be checked separately
+DISK_SECTORS, SYSTEM_START, SYSTEM_SECTORS = 15269888, 923648, 14280671
 REQUIRED = (
     "BLK_DEV_INITRD RD_GZIP DEVTMPFS PROC_FS SYSFS TMPFS TMPFS_XATTR "
     "EXT4_FS OVERLAY_FS BLK_DEV_LOOP MSDOS_PARTITION EFI_PARTITION MMC MMC_BLOCK "
@@ -59,20 +61,20 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def check_busybox(path):
+def check_static_arm64(path, option):
     # Reject dynamically linked binaries: there is no dynamic loader in
     # this initramfs. No target executable runs on the build host.
     with path.open("rb") as stream:
         header = stream.read(64)
         if len(header) != 64 or header[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", header, 18)[0] != 183:
-            fail("--busybox must be a little-endian aarch64 ELF64 executable")
+            fail(f"{option} must be a little-endian aarch64 ELF64 executable")
         if struct.unpack_from("<H", header, 16)[0] not in (2, 3):
-            fail("--busybox must be an executable ELF file")
+            fail(f"{option} must be an executable ELF file")
         entry = struct.unpack_from("<Q", header, 24)[0]
         offset = struct.unpack_from("<Q", header, 32)[0]
         width, count = struct.unpack_from("<HH", header, 54)
         if width != 56 or not count or offset + width * count > path.stat().st_size:
-            fail("invalid busybox ELF program headers")
+            fail(f"invalid {option} ELF program headers")
         segments = []
         for _ in range(count):
             stream.seek(offset + len(segments) * width)
@@ -80,21 +82,21 @@ def check_busybox(path):
             segments.append(segment)
             kind, flags, start, address, _, filesz, memsz, _ = segment
             if filesz > memsz or start + filesz > path.stat().st_size:
-                fail("busybox ELF segment is outside its file")
+                fail(f"{option} ELF segment is outside its file")
             if kind == 3:
-                fail("--busybox must be statically linked (no PT_INTERP)")
+                fail(f"{option} must be statically linked (no PT_INTERP)")
         if not any(kind == 1 and flags & 1 and address <= entry < address + filesz
                    for kind, flags, _, address, _, filesz, _, _ in segments):
-            fail("busybox ELF has no executable entrypoint")
+            fail(f"{option} ELF has no executable entrypoint")
         for kind, _, start, _, _, filesz, _, _ in segments:
             if kind == 2:
                 if filesz % 16:
-                    fail("busybox ELF has an invalid dynamic section")
+                    fail(f"{option} ELF has an invalid dynamic section")
                 stream.seek(start)
                 for _ in range(filesz // 16):
                     tag, _ = struct.unpack("<QQ", stream.read(16))
                     if tag == 1:
-                        fail("--busybox has dynamic dependencies (DT_NEEDED)")
+                        fail(f"{option} has dynamic dependencies (DT_NEEDED)")
                     if tag == 0:
                         break
 
@@ -105,6 +107,8 @@ def check_inputs(args):
     absent = ["CONFIG_" + name for name in REQUIRED if config.get("CONFIG_" + name) != "y"]
     if config.get("CONFIG_EXT2_FS") != "y" and config.get("CONFIG_EXT4_USE_FOR_EXT2") != "y":
         absent.append("CONFIG_EXT2_FS or CONFIG_EXT4_USE_FOR_EXT2")
+    if args.persistence_mapper and config.get("CONFIG_BLK_DEV_DM") != "y":
+        absent.append("CONFIG_BLK_DEV_DM (persistent overlay)")
     if absent:
         fail("initramfs requires built-in drivers: " + ", ".join(absent))
     banner = None
@@ -123,7 +127,9 @@ def check_inputs(args):
     compatible = run("fdtget", "-t", "s", str(args.dtb), "/", "compatible").split()
     if "lenovo,cd-18781y" not in compatible or "qcom,apq8053" not in compatible:
         fail("--dtb is not a Lenovo CD-18781Y APQ8053 device tree")
-    check_busybox(args.busybox)
+    check_static_arm64(args.busybox, "--busybox")
+    if args.persistence_mapper:
+        check_static_arm64(args.persistence_mapper, "--persistence-mapper")
     with args.rootfs.open("rb") as stream:
         stream.seek(1024)
         sb = stream.read(1024)
@@ -201,13 +207,39 @@ def build(args, work, sectors, release):
         (stage / name).mkdir(parents=True)
     shutil.copyfile(args.busybox, stage / "bin/busybox")
     (stage / "bin/busybox").chmod(0o755)
-    applets = "sh mount mkdir cat sleep losetup od tr grep seq cp chmod uname chroot kill switch_root blockdev"
+    applets = "sh mount mkdir cat sleep losetup od tr grep seq cp chmod uname chroot kill switch_root blockdev rm mv"
     for name in applets.split():
         (stage / "bin" / name).symlink_to("busybox")
     for name in ("init", "guard"):
         shutil.copyfile(ROOT / "device/thinksmart/initramfs" / name, stage / name)
         (stage / name).chmod(0o755)
-    (stage / "etc/thinksmart-layout").write_text(f"ROOT_SECTORS={sectors}\n")
+    layout = f"ROOT_SECTORS={sectors}\n"
+    parts = [(BOOT_START, BOOT_SECTORS), (ROOT_START, sectors)]
+    data = None
+    if args.persistence_mapper:
+        data_start = (ROOT_START + sectors + 7) // 8 * 8
+        data_sectors = (SYSTEM_SECTORS - data_start) // 8 * 8
+        if data_sectors < 128 * 2048:
+            fail("persistent overlay needs at least 128 MiB after the root filesystem")
+        data_uuid = uuid.uuid4()
+        data = work / "overlay.ext4"
+        with data.open("wb") as stream:
+            stream.truncate(data_sectors * 512)
+        run("mke2fs", "-q", "-t", "ext4", "-b", "4096", "-m", "0", "-L", "omamobile-data",
+            "-U", str(data_uuid), "-E", "lazy_itable_init=0,lazy_journal_init=0", str(data))
+        run("e2fsck", "-fn", str(data))
+        parts.append((data_start, data_sectors))
+        layout += (f"DISK_SECTORS={DISK_SECTORS}\nSYSTEM_START={SYSTEM_START}\n"
+                   f"SYSTEM_SECTORS={SYSTEM_SECTORS}\nDATA_START={data_start}\n"
+                   f"DATA_SECTORS={data_sectors}\nDATA_UUID={data_uuid.hex}\n")
+        for source, destination in (
+            (ROOT / "device/thinksmart/initramfs/persistence", stage / "persistence"),
+            (args.persistence_mapper, stage / "bin/thinksmart-map"),
+        ):
+            shutil.copyfile(source, destination)
+            destination.chmod(0o755)
+        (stage / "bin/readlink").symlink_to("busybox")
+    (stage / "etc/thinksmart-layout").write_text(layout)
     if args.firstboot_conf:
         shutil.copyfile(args.firstboot_conf, stage / "etc/thinksmart-firstboot.conf")
         (stage / "etc/thinksmart-firstboot.conf").chmod(0o600)
@@ -226,6 +258,13 @@ def build(args, work, sectors, release):
         "  LINUX /Image.gz\n  INITRD /initramfs.cpio.gz\n"
         "  FDT /apq8053-lenovo-cd-18781y.dtb\n"
         "  APPEND console=tty0 console=ttyMSM0,115200n8 rdinit=/init panic=0\n")
+    if data:
+        with (boot / "extlinux/extlinux.conf").open("a") as extlinux:
+            extlinux.write(
+                "\nLABEL persistent\n  MENU LABEL Experimental Omarchy Mobile (persistent overlay)\n"
+                "  LINUX /Image.gz\n  INITRD /initramfs.cpio.gz\n"
+                "  FDT /apq8053-lenovo-cd-18781y.dtb\n"
+                "  APPEND console=tty0 console=ttyMSM0,115200n8 rdinit=/init panic=0 omamobile.persist\n")
     boot_image = work / "boot.ext2"
     with boot_image.open("wb") as stream:
         stream.truncate(BOOT_SECTORS * 512)
@@ -234,15 +273,17 @@ def build(args, work, sectors, release):
     run("e2fsck", "-fn", str(boot_image))
     image = work / "system.img"
     with image.open("wb") as stream:
-        stream.truncate((ROOT_START + sectors) * 512)
+        stream.truncate(sum(parts[-1]) * 512)
         mbr = bytearray(512)
-        for number, start, count in ((0, BOOT_START, BOOT_SECTORS), (1, ROOT_START, sectors)):
+        for number, (start, count) in enumerate(parts):
             struct.pack_into("<B3sB3sII", mbr, 446 + number * 16, 0, b"\xfe\xff\xff", 0x83,
                              b"\xfe\xff\xff", start, count)
         mbr[510:512] = b"\x55\xaa"
         stream.write(mbr)
         sparse_copy(boot_image, stream, BOOT_START * 512)
         sparse_copy(args.rootfs, stream, ROOT_START * 512)
+        if data:
+            sparse_copy(data, stream, data_start * 512)
     boot_image.unlink()
     manifest = {"device": "thinksmart", "status": "experimental, not hardware tested",
                 "storage": "read-only eMMC; volatile 512 MiB root overlay",
@@ -253,6 +294,13 @@ def build(args, work, sectors, release):
                 "private_firstboot_included": bool(args.firstboot_conf),
                 "inputs_sha256": {name: digest(getattr(args, name))
                                   for name in ("kernel", "dtb", "config", "rootfs", "busybox")}}
+    if data:
+        manifest.update(storage="read-only eMMC nodes; bounded writable mapper in persistent entry",
+                        persistent_entry="persistent", data_start=data_start, data_sectors=data_sectors,
+                        data_uuid=str(data_uuid), system_start=SYSTEM_START, disk_sectors=DISK_SECTORS,
+                        initial_data_sha256=digest(data))
+        manifest["inputs_sha256"]["persistence_mapper"] = digest(args.persistence_mapper)
+        data.unlink()
     (work / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (work / "SHA256SUMS").write_text("".join(
         f"{digest(path)}  {path.relative_to(work)}\n"
@@ -265,6 +313,8 @@ def main():
         parser.add_argument("--" + name, required=True, type=regular)
     parser.add_argument("--firstboot-conf", type=regular,
                         help="private firstboot.conf, embedded in the initramfs; keep output private")
+    parser.add_argument("--persistence-mapper", type=regular,
+                        help="static ARM64 mapper built from device/thinksmart/initramfs/map.c")
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     out = args.out.resolve()

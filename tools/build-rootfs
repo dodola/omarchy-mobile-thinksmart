@@ -10,8 +10,9 @@
 #                              ufw, SDDM, and Omarchy itself from [omarchy]
 #   Omarchy's own list         install/omarchy-base.packages from the omarchy
 #                              package, as Omarchy's ISO installs it, minus
-#                              rootfs/packages.omarchy-skip and whatever isn't
-#                              built for aarch64 (listed in the MANIFEST)
+#                              rootfs/packages.omarchy-skip, ROOTFS_OMARCHY_SKIP
+#                              and whatever isn't built for aarch64 (listed in
+#                              the MANIFEST)
 #   rootfs/packages.omamobile  ours, from out/repo (tools/build-packages), plus
 #                              the device package and the board's own ones
 #                              (PACKAGE and ROOTFS_PACKAGES in device.conf)
@@ -112,11 +113,13 @@ DEVICE_PACKAGE=$(sed -n 's/^PACKAGE=\([a-z0-9-]*\)$/\1/p' "$conf")
 [[ -n $DEVICE_PACKAGE ]] || alarm_die "$conf has no PACKAGE"
 ROOTFS_PACKAGES=$(sed -n 's/^ROOTFS_PACKAGES="\(.*\)"$/\1/p' "$conf")
 ROOTFS_OMAMOBILE_SKIP=$(sed -n 's/^ROOTFS_OMAMOBILE_SKIP="\(.*\)"$/\1/p' "$conf")
+ROOTFS_OMARCHY_SKIP=$(sed -n 's/^ROOTFS_OMARCHY_SKIP="\(.*\)"$/\1/p' "$conf")
 # Boot files in the device package: the kernel comes as a package
 KERNEL_PACKAGE=0
 grep -c 'OMAMOBILE_BOOT_FILES' "packages/$DEVICE_PACKAGE/install" >/dev/null 2>&1 && KERNEL_PACKAGE=1
 [[ $ROOTFS_PACKAGES =~ ^[a-z0-9\ -]*$ ]] || alarm_die "$conf: ROOTFS_PACKAGES may hold only package names"
 [[ $ROOTFS_OMAMOBILE_SKIP =~ ^[a-z0-9\ -]*$ ]] || alarm_die "$conf: ROOTFS_OMAMOBILE_SKIP may hold only package names"
+[[ $ROOTFS_OMARCHY_SKIP =~ ^[a-z0-9\ -]*$ ]] || alarm_die "$conf: ROOTFS_OMARCHY_SKIP may hold only package names"
 # This removes explicit requests, not packages selected by dependencies or
 # repository priority. In particular it cannot select an alternative Mesa.
 for package in $ROOTFS_OMAMOBILE_SKIP; do
@@ -162,6 +165,7 @@ docker run --rm --privileged --platform linux/arm64 \
   -e VERSION="$VERSION" -e DEVICE="$DEVICE" -e DEVICE_PACKAGE="$DEVICE_PACKAGE" \
   -e ROOTFS_PACKAGES="$ROOTFS_PACKAGES" -e KERNEL_PACKAGE="$KERNEL_PACKAGE" \
   -e ROOTFS_OMAMOBILE_SKIP="$ROOTFS_OMAMOBILE_SKIP" \
+  -e ROOTFS_OMARCHY_SKIP="$ROOTFS_OMARCHY_SKIP" \
   -e KERNEL_RELEASE="$release" -e MODULES_SHA256="$(sha256sum < "$modules" | cut -d' ' -f1)" \
   -e GIT_COMMIT="$commit" -e ALARM_SHA256="$(sha256sum < "$ALARM_TARBALL" | cut -d' ' -f1)" \
   -e OMARCHY_CHANNEL="$OMARCHY_CHANNEL" -e CHANNEL="$CHANNEL" -e ALLOW_MISSING="$ALLOW_MISSING" \

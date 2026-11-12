@@ -82,6 +82,37 @@ debugfs -R 'cat /extlinux/extlinux.conf' "$t/boot.ext2" > "$t/extlinux" 2> "$t/l
 grep -qx 'DEFAULT diagnostic' "$t/extlinux" || fail 'diagnostic is default'
 echo 'ok - real nested filesystems, exact root bytes, default diagnostic boot, newc ownership and checksums'
 
+tools/build-thinksmart-image "${args[@]}" --persistence-mapper "$t/busybox" --out "$t/persistent" > "$t/log" 2>&1 ||
+  fail 'builds persistent image'
+python3 - "$t/persistent" <<'PY'
+import json, pathlib, struct, sys, uuid
+p = pathlib.Path(sys.argv[1])
+m = json.loads((p/'MANIFEST.json').read_text())
+assert m['default_entry'] == 'diagnostic'
+assert m['persistent_entry'] == 'persistent'
+start, count = m['data_start'], m['data_sectors']
+assert start == m['root_start'] + m['root_sectors']
+assert (start + count) * 512 == (p/'system.img').stat().st_size
+assert 0 <= m['system_capacity_sectors'] - start - count < 8
+with (p/'system.img').open('rb') as s:
+    s.seek(478)
+    third = struct.unpack('<B3sB3sII', s.read(16))
+    assert third[2] == 0x83 and third[-2:] == (start, count)
+    s.seek(start * 512 + 1024)
+    sb = s.read(1024)
+    assert sb[56:58] == b'\x53\xef'
+    assert uuid.UUID(bytes=sb[104:120]) == uuid.UUID(m['data_uuid'])
+    assert sb[120:136].rstrip(b'\0') == b'omamobile-data'
+    blocks = struct.unpack_from('<I', sb, 4)[0]
+    assert blocks * 4096 == count * 512
+extlinux = (p/'boot/extlinux/extlinux.conf').read_text()
+assert extlinux.startswith('DEFAULT diagnostic\n')
+assert extlinux.count('omamobile.persist') == 1
+assert '\nLABEL persistent\n' in extlinux
+PY
+(cd "$t/persistent" && sha256sum -c SHA256SUMS) > "$t/checks"
+echo 'ok - persistent ext4 UUID, exact tail bounds and opt-in boot entry'
+
 reject() {
   local expected=$1; shift
   if tools/build-thinksmart-image "${args[@]}" "$@" > "$t/log" 2>&1; then fail "accepted $expected"; fi
@@ -92,6 +123,8 @@ reject 'existing output' --out "$t/output"
 reject 'regular file' --rootfs /dev/null --out "$t/rejected"
 sed '/CONFIG_MMC_SDHCI_MSM=y/d' "$t/config" > "$t/bad-config"
 reject 'CONFIG_MMC_SDHCI_MSM' --config "$t/bad-config" --out "$t/rejected"
+sed '/CONFIG_BLK_DEV_DM=y/d' "$t/config" > "$t/no-dm-config"
+reject 'CONFIG_BLK_DEV_DM' --config "$t/no-dm-config" --persistence-mapper "$t/busybox" --out "$t/rejected"
 echo '/dts-v1/; / { compatible = "other,board", "qcom,apq8053"; };' > "$t/board.dts"
 dtc -q -I dts -O dtb -o "$t/other.dtb" "$t/board.dts"
 reject 'not a Lenovo' --dtb "$t/other.dtb" --out "$t/rejected"

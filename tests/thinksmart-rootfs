@@ -27,15 +27,22 @@ cat > "$t/bin/docker" <<'SH'
 #!/bin/bash
 set -euo pipefail
 [[ $1 == run ]] || exit 0
-work= skip=
+work= mobile_skip= desktop_skip=
 while (($#)); do
   case $1 in
     -v) [[ $2 != *:/out ]] || work=${2%:/out}; shift ;;
-    -e) [[ $2 != ROOTFS_OMAMOBILE_SKIP=* ]] || skip=${2#ROOTFS_OMAMOBILE_SKIP=}; shift ;;
+    -e)
+      case $2 in
+        ROOTFS_OMAMOBILE_SKIP=*) mobile_skip=${2#ROOTFS_OMAMOBILE_SKIP=} ;;
+        ROOTFS_OMARCHY_SKIP=*) desktop_skip=${2#ROOTFS_OMARCHY_SKIP=} ;;
+      esac
+      shift
+      ;;
   esac
   shift
 done
-echo "$skip" > "$T/profile"
+echo "$mobile_skip" > "$T/mobile-profile"
+echo "$desktop_skip" > "$T/desktop-profile"
 echo fixture > "$work/rootfs.img"
 echo fixture > "$work/MANIFEST"
 SH
@@ -48,7 +55,10 @@ chmod +x "$t/bin/docker" "$R/tests/rootfs-smoke"
 export T=$t PATH="$t/bin:$PATH" DEVICE=thinksmart KERNEL_OUT=$t/kernel
 export ALARM_CACHE=$t/cache ALARM_TARBALL=$t/alarm.tar OMARCHY_CHANNEL=stable
 "$R/tools/build-rootfs" --local thinksmart --version fixture > "$t/log" 2>&1 || fail 'local ThinkSmart rootfs'
-[[ $(cat "$t/profile") == vulkan-panfrost ]] || fail 'device profile reaches the container'
+[[ $(cat "$t/mobile-profile") == vulkan-panfrost ]] || fail 'mobile profile reaches the container'
+expected_desktop_skip=$(sed -n 's/^ROOTFS_OMARCHY_SKIP="\(.*\)"$/\1/p' device/thinksmart/device.conf)
+[[ -n $expected_desktop_skip && $(cat "$t/desktop-profile") == "$expected_desktop_skip" ]] ||
+  fail 'desktop profile reaches the container'
 [[ -f $R/out/thinksmart/omamobile-rootfs-thinksmart-fixture-aarch64.img.zst ]] || fail 'isolated output'
 for omit in mesa unknown-pkg 'bad;command'; do
   sed "s/^ROOTFS_OMAMOBILE_SKIP=.*/ROOTFS_OMAMOBILE_SKIP=\"$omit\"/" device/thinksmart/device.conf > "$R/device/thinksmart/device.conf"
@@ -56,6 +66,11 @@ for omit in mesa unknown-pkg 'bad;command'; do
     fail "accepted invalid omission $omit"
   fi
 done
+sed 's/^ROOTFS_OMARCHY_SKIP=.*/ROOTFS_OMARCHY_SKIP="bad;command"/' device/thinksmart/device.conf > "$R/device/thinksmart/device.conf"
+if "$R/tools/build-rootfs" --local thinksmart --version rejected > "$t/log" 2>&1; then
+  fail 'accepted invalid desktop omission'
+fi
+grep -qF 'ROOTFS_OMARCHY_SKIP may hold only package names' "$t/log" || fail 'invalid desktop omission failed for the wrong reason'
 grep -qF 'gallium-drivers=panfrost,freedreno,' packages/mesa/PKGBUILD || fail 'shared Mesa includes Freedreno'
 grep -qx 'BOOT_METHOD=lk2nd' device/thinksmart/device.conf || fail 'no Android install path'
 grep -qx 'UFS_RW=""' device/thinksmart/device.conf || fail 'no synthetic UFS permission'

@@ -1,0 +1,44 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Sourced by init only for the explicit persistent boot entry.
+
+check_persistence_layout() {
+    tr '\000' '\n' </proc/device-tree/compatible | grep -qx 'lenovo,cd-18781y' || return 1
+    system_entry=$(readlink -f "/sys/class/block/${system##*/}") || return 1
+    disk_entry=${system_entry%/*}
+    [ "$(cat "$disk_entry/device/type")" = MMC ] &&
+        [ "$(cat "$disk_entry/removable")" = 0 ] &&
+        [ "$(cat "$disk_entry/size")" = "$DISK_SECTORS" ] &&
+        [ "$(cat "$system_entry/start")" = "$SYSTEM_START" ] &&
+        [ "$(cat "$system_entry/size")" = "$SYSTEM_SECTORS" ] || return 1
+    [ "$DATA_START" -ge "$((512000 + ROOT_SECTORS))" ] &&
+        [ "$DATA_SECTORS" -ge 262144 ] &&
+        [ "$((DATA_START + DATA_SECTORS))" -le "$SYSTEM_SECTORS" ] || return 1
+    [ "$(od -An -tu1 -j 482 -N 1 "$system" | tr -d ' \n')" = 131 ] || return 1
+    set -- $(od -An -tu4 -j 486 -N 8 "$system")
+    [ "$#" = 2 ] && [ "$1" = "$DATA_START" ] && [ "$2" = "$DATA_SECTORS" ]
+}
+
+create_persistence_mapper() {
+    /bin/thinksmart-map "$(cat "$system_entry/dev")" "$DATA_START" "$DATA_SECTORS" || return 1
+    for entry in /sys/class/block/dm-*; do
+        [ -r "$entry/dm/name" ] || continue
+        [ "$(cat "$entry/dm/name")" = thinksmart-overlay ] || continue
+        [ "$(cat "$entry/dm/uuid")" = OMAMOBILE-THINKSMART-OVERLAY ] &&
+            [ "$(cat "$entry/size")" = "$DATA_SECTORS" ] || return 1
+        mapper=/dev/${entry##*/}
+        [ -b "$mapper" ] || return 1
+        cat "$entry/dev" > /run/omamobile-thinksmart/writable || return 1
+        return 0
+    done
+    return 1
+}
+
+mount_persistence() {
+    [ "$(blockdev --getro "$mapper")" = 0 ] || return 1
+    [ "$(od -An -tx2 -j 1080 -N 2 "$mapper" | tr -d ' \n')" = ef53 ] || return 1
+    [ "$(od -An -tx1 -j 1128 -N 16 "$mapper" | tr -d ' \n')" = "$DATA_UUID" ] || return 1
+    chmod 700 /run/overlay &&
+        mount -t ext4 -o rw,nodev,nosuid "$mapper" /run/overlay &&
+        chmod 700 /run/overlay
+}

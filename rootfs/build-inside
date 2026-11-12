@@ -8,7 +8,8 @@
 #   /target   an empty volume: the root file system is assembled here
 #   /out      where the raw image and the MANIFEST go
 # Environment: VERSION, DEVICE, DEVICE_PACKAGE, ROOTFS_PACKAGES,
-# ROOTFS_OMAMOBILE_SKIP (explicit shared requests omitted for this board), and
+# ROOTFS_OMAMOBILE_SKIP and ROOTFS_OMARCHY_SKIP (explicit requests omitted for
+# this board), and
 # ALLOW_MISSING (both space-separated), KERNEL_PACKAGE (1: the device
 # package ships boot files, so linux-omamobile and omamobile-boot-update go
 # in and the package's modules replace the tarball), KERNEL_RELEASE, MODULES_SHA256,
@@ -83,6 +84,8 @@ pacstrap -C /etc/pacman.conf -c -M "$T" "${base[@]}" >/var/log/pacstrap-base.log
 omarchy_list=$T/usr/share/omarchy/install/omarchy-base.packages
 [[ -f $omarchy_list ]] || die "no $omarchy_list in the omarchy package"
 mapfile -t skip < <(list /src/rootfs/packages.omarchy-skip)
+read -ra device_skip <<<"${ROOTFS_OMARCHY_SKIP:-}"
+skip+=("${device_skip[@]}")
 listed=()
 while read -r p; do
   [[ " ${skip[*]} " == *" $p "* ]] || listed+=("$p")

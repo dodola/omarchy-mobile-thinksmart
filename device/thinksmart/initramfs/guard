@@ -1,16 +1,23 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# No writable allowlist. Protect disks as well as partitions and loop maps.
+# Protect disks, partitions and virtual maps. Only init's bounded data
+# mapper can be writable, and only in the explicit persistent entry.
 if [ -x /run/omamobile-thinksmart/busybox ]; then
     bb=/run/omamobile-thinksmart/busybox
 else
     bb=/bin/busybox
 fi
 scan() {
-    for entry in /sys/class/block/mmcblk* /sys/class/block/sd* /sys/class/block/loop*; do
+    for entry in /sys/class/block/mmcblk* /sys/class/block/sd* /sys/class/block/loop* /sys/class/block/dm-*; do
         [ -r "$entry/ro" ] || continue
         name=${entry##*/}
         [ -b "/dev/$name" ] || continue
+        if [ -r "$entry/dm/uuid" ] && [ -r /run/omamobile-thinksmart/writable ] &&
+            [ "$("$bb" cat "$entry/dm/uuid")" = OMAMOBILE-THINKSMART-OVERLAY ] &&
+            [ "$("$bb" cat "$entry/dm/name")" = thinksmart-overlay ] &&
+            [ "$("$bb" cat "$entry/dev")" = "$("$bb" cat /run/omamobile-thinksmart/writable)" ]; then
+            continue
+        fi
         [ "$("$bb" cat "$entry/ro")" = 1 ] && continue
         "$bb" blockdev --setro "/dev/$name" || return 1
         [ "$("$bb" cat "$entry/ro")" = 1 ] || return 1

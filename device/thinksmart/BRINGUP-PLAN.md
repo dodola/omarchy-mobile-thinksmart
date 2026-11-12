@@ -50,7 +50,29 @@ The offline image contains an MBR, `pmOS_boot` (ext2) and
 `omamobile-root` (ext4). The initramfs protects every eMMC/SCSI block node,
 including whole disks, boot partitions and loop devices, read-only. It
 mounts the nested filesystems read-only and uses tmpfs for the writable
-overlay. The initial root does not have a persistence allowlist.
+overlay.
+
+An optional offline image uses a third nested partition after the root.
+It preserves the planned outer `system` start (923648) and size
+(14280671 sectors) on the 15269888-sector eMMC. No additional outer GPT
+entry is needed. Only the `persistent` boot entry opens a linear
+device-mapper target for that tail extent. lk2nd follows the extlinux
+`DEFAULT` directive, so activate this entry in a local image copy after
+the diagnostic stage is reviewed. The initramfs checks the board, non-removable
+MMC, geometry, nested MBR entry and the generated ext4 UUID. The target must
+take its backing reference before software read-only flags are set, so the
+initramfs runs no shell prompt, services or filesystem mounts in that
+interval. It applies the guard before mounting either filesystem. The
+guard protects physical nodes and loop maps and leaves only the specific
+data mapper writable. The Linux block layer may report a write to the
+read-only backing device when the already opened mapper submits it.
+
+The data filesystem contains the OverlayFS upper and work directories.
+An image rebuilt with a new data filesystem starts with an empty upper.
+Offline validation must cover repeated mounts, package and settings
+retention, failed geometry/UUID checks, direct write rejection and a
+byte comparison outside the mapped extent. The default diagnostic and
+RAM-overlay entries still keep all block devices read-only.
 
 If the guard cannot protect a newly visible device, it sets the panic
 timeout to zero and triggers a kernel panic to halt all userspace. It
@@ -183,8 +205,9 @@ manifest and compare all staged files to the supplied inputs. The root
 must contain the matching kernel module directory and the ThinkSmart
 package, with no automatic DPMS/suspend or unreviewed radio services.
 
-Stop: missing inputs, mismatched module release, too-large image, persistent
-write enablement, automatic driver experiments, or identifiers in the image.
+Stop: missing inputs, mismatched module release, too-large image, a writable
+physical node at handoff, data writes outside the tested mapper, automatic
+driver experiments, or identifiers in the image.
 Rollback: retain or discard the regular output file; no device changes.
 Record checks and their actual results in NOTES.md, without claiming that
 an image-format test proves a boot.
