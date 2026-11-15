@@ -1,9 +1,10 @@
 <!-- SPDX-License-Identifier: MIT -->
-# ThinkSmart View 离线移植
+# ThinkSmart View 离线构建指南
 
 目标仅为 **Lenovo ThinkSmart View CD-18781Y / APQ8053 / 2 GB / 8 GB eMMC**。
-当前是实验性离线实现，尚无真机启动结果。源码依据、风险、停止条件及恢复要求见
-[BRINGUP-PLAN.md](BRINGUP-PLAN.md)，实际验证结果见 [NOTES.md](NOTES.md)。
+已在一台设备上验证 Linux 启动、持久化、桌面触控和锁屏解锁。开发镜像仍需主机
+放行启动检查点。当前功能和待验证项见 [项目进度](../../README.zh-CN.md)，
+构建依据与恢复边界见 [BRINGUP-PLAN.md](BRINGUP-PLAN.md)。
 
 系统路线为 Arch Linux ARM → Omarchy / Hyprland，保留设备现有的
 lk2nd → extlinux 启动方式。它不复用 Pixel 的刷写路径，也不转换已有系统。
@@ -32,15 +33,15 @@ Docker、可用的 aarch64 binfmt/QEMU、GnuPG、zstd、dtc 和 e2fsprogs。
    如使用带后缀的工具链，可在命令前加 `LLVM=-18`；仅检查配置时加
    `--config-only`，并另选一个空输出目录。
 
-2. 建立本地签名仓库。`local-key-init` 只运行一次；已有密钥时跳过它。
-   密钥仅保存在忽略的 `keys/thinksmart/`，不要上传。导入项目已发布的签名包，
-   再构建包含 Freedreno 的 Mesa 和本设备包：
+2. 建立本地签名仓库。`local-key-init` 只运行一次，已有密钥时跳过。
+   密钥仅保存在忽略的 `keys/thinksmart/`。导入项目已发布的签名包，
+   再构建包含 Freedreno 的 Mesa、设备包和 Omarchy 补丁包。
 
    ```sh
    tools/local-key-init thinksmart
    tools/fetch-published --channel development out/thinksmart/published
    tools/build-packages --local thinksmart --import out/thinksmart/published \
-     packages/mesa packages/omamobile-device-thinksmart
+     packages/mesa packages/omamobile-device-thinksmart packages/omamobile-omarchy
    ```
 
    旧的项目 Mesa 包没有 Freedreno，不能作为替代。新设备包声明了最低版本要求。
@@ -90,7 +91,8 @@ Docker、可用的 aarch64 binfmt/QEMU、GnuPG、zstd、dtc 和 e2fsprogs。
    输出包括 `system.img`、`boot/`、`MANIFEST.json` 和 `SHA256SUMS`。
    `system.img` 是 `system` 分区内部的嵌套镜像，**不是整盘镜像**。
    默认启动项是只读诊断环境，`omamobile` 条目使用内存覆盖层。
-   诊断环境没有 USB 网络服务；UART、屏幕及输入均有待真机验证。
+   这里生成的是基础镜像。已在真机验证的 CDC ACM 串口来自另行准备的开发启动区。
+   参考 [验证记录](NOTES.md) 了解运行时配置。
 
    裸根镜像没有用户。后续要验证桌面时，可在打包命令中显式加入
    `--firstboot-conf /absolute/private/firstboot.conf`；格式及校验器见
@@ -129,9 +131,7 @@ tests/thinksmart-image
 tests/boot-method
 ```
 
-这些检查覆盖设备包、构建参数、真实镜像文件系统结构、容量与 ABI 检查，以及
-现有刷写工具的拒绝行为。它们不证明设备能启动，也不验证触摸、Adreno 加速、
-Wi-Fi、USB、音频、蓝牙、传感器或摄像头。
-
-当前项目安全规则没有授权此设备的 `boot`、`system` 或 GPT 写入。因此这里不提供
-刷写命令；拿到设备后先做只读信息和备份核对，再审查它专用的安装与恢复流程。
+这些离线检查覆盖设备包、构建参数、镜像文件系统结构、容量、ABI 和通用刷写工具
+对设备型号的检查。真机测试的范围单独记录在 [NOTES.md](NOTES.md)。
+在安装前先只读核对实机分区和备份，再审查该设备专用的安装与恢复流程。
+[安装与恢复边界](BRINGUP-PLAN.md#g4-hardware-authorization-boundary-high-risk-local-run-authorized)

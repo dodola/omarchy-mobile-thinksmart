@@ -1,4 +1,57 @@
-# Omarchy Mobile
+<!-- SPDX-License-Identifier: MIT -->
+# Omarchy Mobile for ThinkSmart View
+
+[简体中文](README.zh-CN.md)
+
+This fork ports Arch Linux ARM, Hyprland, and the Omarchy Mobile desktop
+to the **Lenovo ThinkSmart View CD-18781Y** (Qualcomm APQ8053/MSM8953,
+2 GB RAM, 8 GB eMMC, 800 × 1280 panel). The port is experimental and
+has been tested on one unit with an FT8201 panel. The development image
+still requires an attended boot with a host-controlled checkpoint.
+
+## ThinkSmart View status
+
+Updated 2026-11-15.
+
+| Area | Current result |
+| --- | --- |
+| Boot | lk2nd compat2 selects the extlinux entry and hands off to Linux 6.19.5. The guarded persistent root reaches systemd and completes Omarchy firstboot. The test image reaches a host checkpoint on a cold boot. |
+| Storage and apps | The 2.88 GiB ext4 overlay retains installed packages, settings and user files across a cold boot. The tested installation had about 2.1 GiB free at the recorded checkpoint. The offline image contains Omarchy, its mobile shell and Chromium. A signed package installed with pacman and retained its state across restarts. |
+| Display and graphics | The FT8201 panel runs at 800 × 1280 via DSI and MSM DRM. Mesa reported Adreno A506 as `FD506` and an EGL/GBM test read back the expected rendered pixel. The test used firmware supplied from the owner's stock backup. |
+| Desktop and touch | The installed SDDM → UWSM → Omarchy session ran with targeted runtime udev setup. Physical taps hit the intended targets and a finger swipe scrolled a Wayland window. |
+| Lock screen | The ThinkSmart policy keeps the panel lit past the lock screen's blank timer. Automatic login locking and normal PAM authentication remain active. A fresh SDDM login locked successfully, and the owner unlocked by touch using the original credential. This fix has been tested by relogin. A full cold-boot retest remains pending. |
+| Chromium | The sandboxed headless browser retained localStorage across a cold boot. A sandboxed native Wayland window opened using software rendering. Chromium's GPU path remains unverified and the tested GPU subprocess exited. |
+| USB and recovery | CDC ACM serial works with Windows in USB device mode on the test image. An OTG keyboard showed no response in the diagnostic trial, so USB-C host mode remains unverified. Attended watchdog and shutdown tests recovered to the checkpoint with storage checks passing. |
+
+The remaining work includes an unattended cold boot to the desktop with
+persistent display and touch setup, USB host and suspend/resume testing,
+and validation of Wi-Fi, Bluetooth, audio, cameras and sensors. See the
+[test notes](device/thinksmart/NOTES.md) and [watchdog plan](device/thinksmart/WATCHDOG-PLAN.md).
+
+## ThinkSmart View builds and recovery
+
+- **Build on Linux or WSL2.** The port uses the pinned
+  `msm8953-mainline/linux` `v6.19.5-r0` source, a matching ARM64 module set
+  and a local signed package repository. The Chinese build guide covers
+  dependencies, package selection, root filesystem compaction and offline
+  verification. [Build guide](device/thinksmart/README.zh-CN.md)
+- **Choose a boot entry in an offline image copy.** The packer creates a
+  nested MBR image for the eMMC `system` partition. `diagnostic` is the
+  read-only default. `omamobile` uses a RAM overlay. With the optional
+  mapping helper, `persistent` uses the ext4 data extent at the end of
+  `system`. lk2nd follows the extlinux `DEFAULT` directive. A replacement
+  full `system.img` includes the data extent and can overwrite user data.
+  [Storage layout](device/thinksmart/BRINGUP-PLAN.md#boot-and-storage-boundary)
+- **Keep a verified recovery copy.** The test unit was migrated with a
+  device-specific Windows EDL/WinUSB procedure. Its stock eMMC image
+  was backed up and checked with SHA-256. Restoring stock after GPT migration
+  uses that full backup. A verified previous boot slice is the rollback
+  for a boot-slice update. Keep backups, GPT payloads, firstboot
+  credentials and stock firmware private. The public tools build offline
+  images, and the generic Pixel installer rejects ThinkSmart.
+  [Install and recovery boundary](device/thinksmart/BRINGUP-PLAN.md#g4-hardware-authorization-boundary-high-risk-local-run-authorized)
+
+## Upstream Omarchy Mobile
 
 Native Omarchy on mobile devices: Arch Linux ARM, Hyprland and Omarchy's own packages running directly on the device with a mainline kernel, with Android apps in Waydroid as a later goal. The reference device is the Pixel 7 Pro (cheetah, gs201); community ports cover more Pixels, and the first non-Pixel ports are in review ([docs/DEVICES.md](docs/DEVICES.md)).
 
@@ -11,7 +64,7 @@ Native Omarchy on mobile devices: Arch Linux ARM, Hyprland and Omarchy's own pac
 
 What works on each phone, and the notes behind it: [docs/DEVICES.md](docs/DEVICES.md). What's next: [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## Quick start
+## Upstream Pixel quick start
 
 **Installing a release?** Follow [docs/INSTALL.md](docs/INSTALL.md): it installs a downloaded, signed release bundle, with no build and no checkout of this repository. The steps below build everything yourself.
 
@@ -62,7 +115,7 @@ Large trees live outside the repo: the Android-side sources, images and captures
 
 ## Ground rules
 
-- We only ever flash the boot images and userdata. Never `bootloader`, `radio`, `devinfo`, `persist` or calibration partitions.
+- The upstream Pixel installer writes slot-B boot images and `userdata` within its documented device policy. For the experimental ThinkSmart workflow, see the separate install and recovery boundary above.
 - **Licensing:** this repository is MIT ([LICENSE](LICENSE)) except where a file's SPDX header says otherwise. Kernel patches (and the board dtbo source) are GPL-2.0. The port of Google's Apache-2.0 boot-control code keeps that licence and Google's notice (`packages/omamobile-device-cheetah/src/omamobile-bootctl.c`). Every file we write carries an SPDX header.
 - Google's proprietary firmware and binaries are never committed: our scripts extract them from the user's own factory image.
 - No code from unlicensed sources. Google's GPL kernel, upstream Linux, postmarketOS and Mesa are fine.

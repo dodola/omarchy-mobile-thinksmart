@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MIT -->
 # ThinkSmart View CD-18781Y: first-light plan
 
-Status (2026-11-14): experimental bring-up. One owner's separately authorized
+Status (2026-11-15): experimental bring-up. One owner's separately authorized
 EDL installation and bounded boot updates have completed with full readback.
 The lk2nd compatibility and framebuffer handoff fixes reach Linux.
 `6.19.5-thinksmart1-g770e10fa15a0` now boots the guarded persistent root and
@@ -14,8 +14,10 @@ pass. A temporary Hyprland session maps a native Wayland terminal and a
 Chromium window using software rendering for Chromium. With targeted
 runtime udev setup, the installed SDDM/UWSM Omarchy session accepts physical
 taps on the intended targets and a finger swipe scrolls a Wayland window.
-The startup lock path produced a black screen on this unit. Normal cold
-boot into a usable session and USB host mode remain to be verified. See
+The board's lock display policy fixes the black screen. SDDM relogin
+verified that the secure lock stays visible and accepts the original
+credential by touch. Normal cold boot to the desktop and USB host mode
+remain to be verified. See
 [lk2nd compatibility](lk2nd/README.md) and the dated
 entry in [NOTES.md](NOTES.md); this does not establish a public installer or
 extend authorization to another device. Kernel source: `msm8953-mainline/linux`
