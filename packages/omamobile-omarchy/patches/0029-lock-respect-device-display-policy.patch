@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+# Some panels cannot recover from DPMS off. Let the device keep its lock
+# screen visible while the usual session lock and PAM authentication run.
+diff --git i/shell/plugins/lock/Service.qml w/shell/plugins/lock/Service.qml
+--- i/shell/plugins/lock/Service.qml
++++ w/shell/plugins/lock/Service.qml
+@@ -355,3 +355,13 @@
++  FileView {
++    id: keepLockDisplayOn
++    path: "/usr/lib/omamobile/thinksmart/keep-lock-display-on"
++    printErrors: false
++  }
++
+   function runBlank() {
++    if (keepLockDisplayOn.loaded) {
++      logEvent("auto-blank-skipped: device display policy")
++      return
++    }
+     markDark()
+     pauseFingerprint()

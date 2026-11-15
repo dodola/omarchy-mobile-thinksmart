@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Experimental, disabled until the attended watchdog bootstrap gate.
+// Register extent and SPI numbers: owner's offline stock DT.
+// KPSS register layout: pinned qcom-wdt.c and Qualcomm watchdog_v2.c.
+&soc {
+	thinksmart_watchdog: watchdog@b017000 {
+		compatible = "qcom,kpss-wdt";
+		reg = <0x0b017000 0x1000>;
+		clocks = <&sleep_clk>;
+		clock-names = "sleep";
+		interrupts = <GIC_SPI 3 IRQ_TYPE_EDGE_RISING>,
+			     <GIC_SPI 4 IRQ_TYPE_EDGE_RISING>;
+		timeout-sec = <20>;
+		status = "disabled";
+	};
+};

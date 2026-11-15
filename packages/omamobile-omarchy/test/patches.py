@@ -515,14 +515,18 @@ def lock_glance(root):
     ok(len(wake) == 2 and "root.wakeSerial += 1" in wake[1].split("}", 1)[0]
        and "wakeSerial: root.wakeSerial" in service,
        "real omarchy: the wake call brings the glance back (0023)")
-    blank = service.split("function runBlank() {", 1)
+    blank = service.partition("  function runBlank() {\n")[2].partition("\n  }")[0]
     dark = service.split("function dark(): string {", 1)
     run_wake = service.split("function runWake() {", 1)
-    ok(len(blank) == 2 and "markDark()" in blank[1].split("}", 1)[0]
+    ok("markDark()" in blank
        and len(dark) == 2 and "root.markDark()" in dark[1].split("}", 1)[0]
        and len(run_wake) == 2 and "displayDark = false" in run_wake[1].split("}", 1)[0]
        and "blankSerial: root.blankSerial" in service and "displayDark: root.displayDark" in service,
        "real omarchy: the lock's blank and the dark call bring the glance back, a wake lights it (0023)")
+    ok('path: "/usr/lib/omamobile/thinksmart/keep-lock-display-on"' in service
+       and blank.startswith('    if (keepLockDisplayOn.loaded) {\n')
+       and "      return\n    }\n    markDark()" in blank,
+       "real omarchy: device display policy guards the automatic blank only")
     ok("maximumLineCount: root.summaryLines" in card and "maximumLineCount: root.bodyLines" in card
        and "property int summaryLines: 2" in card and "property int bodyLines: 3" in card,
        "real omarchy: notification toasts keep their line counts (0023)")

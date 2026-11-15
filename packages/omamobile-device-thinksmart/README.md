@@ -8,7 +8,9 @@ All eMMC block devices remain read-only. The initramfs must protect them
 before systemd and use a RAM overlay for writable root state. This package
 contains no boot writer, slot-success helper, firmware or audio service.
 Suspend is masked; the first-light session disables idle blanking and the
-phone power-key DPMS binding. Scale 1 is seeded once for the 800×1280 panel.
+phone power-key DPMS binding. The lock screen stays lit so it can be unlocked
+by touch on the ThinkSmart View, which has no power key. Lock-on-start and
+PAM authentication still apply. Scale 1 is seeded once for the 800×1280 panel.
 
 Build the new Mesa and device package in a contributor repository with
 `tools/build-packages --local thinksmart packages/mesa packages/omamobile-device-thinksmart`.

@@ -1,8 +1,24 @@
 <!-- SPDX-License-Identifier: MIT -->
 # ThinkSmart View CD-18781Y: first-light plan
 
-Status (2026-11-11): experimental offline port. No device has been connected,
-booted or flashed by this work. Kernel source: `msm8953-mainline/linux`
+Status (2026-11-14): experimental bring-up. One owner's separately authorized
+EDL installation and bounded boot updates have completed with full readback.
+The lk2nd compatibility and framebuffer handoff fixes reach Linux.
+`6.19.5-thinksmart1-g770e10fa15a0` now boots the guarded persistent root and
+hands off to systemd using its embedded USB console scripts. Software
+firstboot, signed package execution and sandboxed headless Chromium pass.
+Existing probes, the installed test package, matching modules and browser
+test-profile state survive a cold boot. The image still requires host
+release of its checkpoint. DSI modesetting and an Adreno A506 render/readback
+pass. A temporary Hyprland session maps a native Wayland terminal and a
+Chromium window using software rendering for Chromium. With targeted
+runtime udev setup, the installed SDDM/UWSM Omarchy session accepts physical
+taps on the intended targets and a finger swipe scrolls a Wayland window.
+The startup lock path produced a black screen on this unit. Normal cold
+boot into a usable session and USB host mode remain to be verified. See
+[lk2nd compatibility](lk2nd/README.md) and the dated
+entry in [NOTES.md](NOTES.md); this does not establish a public installer or
+extend authorization to another device. Kernel source: `msm8953-mainline/linux`
 `v6.19.5-r0`, commit `770e10fa15a00051eaef862e4cb2724f2f8fa568`.
 Use a dedicated source checkout and a separate output directory; there is no
 shared kernel output or release-kernel branch for this port.
@@ -22,12 +38,12 @@ place. Changes in the RAM overlay disappear when power is removed.
 
 | Claim | Evidence | Status on this port |
 | --- | --- | --- |
-| Board identity and device tree | [Linux board DTS at the pinned revision](https://github.com/msm8953-mainline/linux/blob/770e10fa15a00051eaef862e4cb2724f2f8fa568/arch/arm64/boot/dts/qcom/apq8053-lenovo-cd-18781y.dts), `compatible = "lenovo,cd-18781y", "qcom,apq8053", "qcom,msm8953"` | Source checked; hardware untested |
+| Board identity and device tree | [Linux board DTS at the pinned revision](https://github.com/msm8953-mainline/linux/blob/770e10fa15a00051eaef862e4cb2724f2f8fa568/arch/arm64/boot/dts/qcom/apq8053-lenovo-cd-18781y.dts), `compatible = "lenovo,cd-18781y", "qcom,apq8053", "qcom,msm8953"` | Source and runtime compatible checked |
 | Kernel and build toolchain | [Reference kernel build notes](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/kernel/README.md) and [build script](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/kernel/build.sh): 6.19.5-r0, ARM64, LLVM; reference container uses clang 21.1.8 | Built offline with LLVM 18; source warnings and validation limits in NOTES.md |
-| Boot layout | [Reference layout description](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/README.en.md#partitions-and-boot): stock boot chain → lk2nd → extlinux on an ext2 boot filesystem inside `system` | Source checked; owner's layout unknown |
-| Nested image geometry | [Reference image builder](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/image/build-image.sh): MBR boot start 2048, boot size 509952 sectors, root start 512000 | Source checked; image format only, no permission to write it |
-| Display and touch | Linux DTS contains FT8201 and HX83100A variants, 800 × 1280 touch geometry; panel selection must preserve lk2nd's board fixups | Hardware untested |
-| GPU | Linux DRM MSM/MDP5 and A506 firmware path; reference carries freedreno fixes in [Mesa build script](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/mesa/build-mesa.sh) | Hyprland untested |
+| Boot layout | [Reference layout description](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/README.en.md#partitions-and-boot): stock boot chain → lk2nd → extlinux on an ext2 boot filesystem inside `system` | Migrated layout and boot update readbacks verified; Linux and systemd observed |
+| Nested image geometry | [Reference image builder](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/image/build-image.sh): MBR boot start 2048, boot size 509952 sectors, root start 512000 | Bounded root/data mapping and persistent retention verified on hardware |
+| Display and touch | Linux DTS contains FT8201 and HX83100A variants, 800 × 1280 touch geometry; panel selection preserves lk2nd's board fixups | FT8201 DSI connected and enabled at 800 × 1280, with MSM DRM framebuffer active. Physical touches generated evdev tracking and X/Y updates |
+| GPU | Linux DRM MSM and A506 firmware path; Linux reads the signed ZAP path from the live device tree | With the owner's firmware staged in RAM, Mesa EGL reported `FD506` and read back the expected GPU-rendered pixel |
 | Display power-off | [Reference session](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/kiosk/thinksmart-kiosk-session) disables idle blanking because DRM Off does not recover | Avoid DPMS/suspend during first light |
 | USB networking | [Reference USB note](https://github.com/justhalfbit/thinksmart-ubuntu-image/blob/d2e32393b30dfcc8397192747fced0fb7115fc33/README.en.md#usb-network-after-flashing) reports unavailable USB device mode after handoff | No working recovery network assumed |
 | Audio, Wi-Fi, Bluetooth, sensors, camera | Reference has device-specific drivers/configuration, but these are separate hardware gates | Not tested or claimed working |
@@ -94,8 +110,9 @@ watchdog behaves.
 The project safety model has **no ThinkSmart entry** authorizing unsuffixed
 `boot`, `system`, EDL or GPT writes. This plan adds no exception. An image
 file produced on the laptop is not an approved installation procedure.
-The owner and maintainer must resolve that policy gap and review exact
-backup/recovery commands before any first boot or flash. A dedicated
+The current owner's separate local approval and checked backup/recovery
+procedure are recorded under G4. A reusable public installer still needs
+the policy gap resolved and its exact recovery commands reviewed. A dedicated
 initramfs cannot protect storage while an external download-mode writer
 runs.
 
@@ -212,9 +229,47 @@ Rollback: retain or discard the regular output file; no device changes.
 Record checks and their actual results in NOTES.md, without claiming that
 an image-format test proves a boot.
 
-### G4: hardware authorization boundary (high risk; blocked)
+### G4: hardware authorization boundary (high risk; local run authorized)
 
-There is no authorized flash/boot command in this plan. Before advancing,
+For the current owner's unit only, the owner separately approved the full
+backup, calibration relocation, both GPT writes and installation, then
+authorized computer-side progression while retaining control of physical
+hardware actions. Those writes and their readbacks are recorded in NOTES.md.
+The compat2 display-handoff fix was installed and fully read back;
+protected regions were unchanged. The owner's next boot reached the
+Linux diagnostic shell, but the owner's OTG keyboard produced no input.
+The USB serial diagnostic boot slice has been installed after live
+identity/readback checks and fully read back; GPTs, calibration and lk2nd
+were unchanged. The owner's boot log reaches the UDC but reports an ACM
+association error. The v2 correction to the helper's relative-path bug
+passed offline checks and has been installed after live verification, with
+the entire boot slice read back and protected regions unchanged. The
+owner's next boot initially produced a Windows device-descriptor request
+failure. After full power removal, the display recovered and CDC ACM
+enumerated. Live serial commands now verify the kernel, configured UDC,
+running guard, read-only MMC nodes and the bounded read-only root mount.
+The working diagnostic slice is retained for rollback. The persistent USB
+checkpoint candidate has since passed offline checks, was installed after
+fresh identity and protected-region checks, and was completely read back.
+Protected regions remained unchanged. It preserves the control path and
+stops for inspection of the bounded persistent mapper before handing off
+to userspace. The owner's cold boot has now verified the mapper, guarded
+mounts and probe-file retention across a remount. All filesystems were
+cleanly unmounted and all block nodes made read-only again. The current
+boundary has advanced: the owner's cold boot retained both probe files.
+A gated systemd handoff initially failed because both USB console
+preludes exited on `stty` failure. After the owner's next cold boot,
+journal recovery and the existing probes checked out. A RAM-only
+correction now reaches systemd with working serial command roundtrips
+and an active guard. A separate serial connection confirms control.
+The later nftables kernel boot update embeds that console correction and
+has passed a new cold boot and systemd handoff without a RAM patch.
+Software firstboot and application cold-boot retention now pass. Hardware
+coldplug and graphical login remain runtime-masked. The public installer policy below
+remains unresolved; the local approval is not a reusable device exception.
+
+There is no generally authorized flash/boot command in this plan. For a
+reusable installation workflow,
 the maintainer must approve a ThinkSmart safety-model entry, exact allowed
 partitions, serial/model pinning, an attended dry run, backup checks,
 buttons-only recovery and restoration steps. The human must approve each
@@ -224,20 +279,37 @@ are not made safe by being described in the reference repository.
 Expect/Pass: separately reviewed, device-specific authorization and runbook.
 Stop: any missing prerequisite. Rollback: do not write the device.
 
-### G5: first-light validation (high risk; pending G4)
+### G5: first-light validation (high risk; diagnostic output observed)
 
-The future attended test starts in `omamobile.initramfs` console mode.
+The attended test has reached `omamobile.initramfs` console mode and its
+system/persist read-only marker on `6.19.5-g770e10fa15a0`. USB serial input,
+read-only root mounting, matching modules and package inventory have now
+been verified. The owner's separately authorized persistent entry has also
+passed live mapper-boundary, protected-node and remount-retention checks.
+Cold-boot probe retention has passed. The later installed kernel
+`6.19.5-thinksmart1-g770e10fa15a0` provides an interactive systemd USB
+console through the embedded correction and an active guard. Its nftables
+API resolves the firstboot failure: service exit zero, done marker present,
+private configuration removed. The signed test package, all matching
+module files and the existing sandboxed headless Chromium test profile
+survive the owner's cold boot. Desktop/input remain unverified; the last
+OTG keyboard observation was unpowered and unresponsive. The image still
+requires host-controlled checkpoint and userspace release.
 Announce that the screen will change before the human starts it. Record
 `uname -r`; verify every persistent disk, partition and loop is read-only;
 inspect mounts without write tests. Verify a console/recovery path before
 attempting handoff to the root in a subsequent approved boot.
 
-Expect/Pass: console works, guard holds, nested root opens read-only and
-RAM overlay is the sole writable root layer. Stop: an unexpected persistent
+Expect/Pass: console works, guard holds and nested root opens read-only.
+The generic diagnostic/RAM entry has no persistent writer. For this owner's
+authorized persistent run, only the exact bounded data mapper may back the
+writable overlay; raw disks and partitions remain read-only. Stop: an unexpected persistent
 read-write node, kernel oops, inaccessible console or missing recovery path.
 Rollback: human follows the approved G4 recovery runbook; no automatic
-reboot. A 2 GB device may run out of RAM with a large overlay, so first
-light must avoid updates and package installation in the running system.
+reboot. A 2 GB device may run out of RAM with a large overlay, so diagnostic
+and RAM-overlay first light must avoid package installation. The bounded
+persistent overlay has separately passed the runtime write and cold-boot
+probe gates above; software tests there must retain the guard and control path.
 
 Only after that gate: one subsystem per approved boot, log stream before
 driver loads, a verified watchdog/dead-man procedure where appropriate,
@@ -246,3 +318,75 @@ Bluetooth, audio and sensors. Keep the camera and the VCNL4200 kernel driver
 disabled until separately reviewed. Do not test DPMS off or suspend until
 panel recovery has its own gated plan. No feature is marked working until
 the dated result includes its actual kernel release.
+
+### G6: prepare display and touch recovery (offline/read-only first)
+
+The 2026-11-14 inventory on `6.19.5-thinksmart1-g770e10fa15a0` shows a
+working simplefb console but no `/dev/dri` card. MDSS, GPU and the selected
+FT8201 I2C node are unbound; only gpio-keys has an input handler. Keep the
+existing runtime masks until individual driver probes have a recovery
+path. No broad udev trigger or graphical-login start is part of this gate.
+
+Offline source inspection maps the selected `focaltech,ft8201` compatible
+to the pinned `edt-ft5x06` driver; the matching module is built. This is
+not a successful touch probe. The owner's offline stock boot bundle also
+contains a downstream watchdog node consistently across its DT candidates.
+It uses a different binding from mainline `qcom-wdt`, without an explicit
+clock reference. Source comparison and the pinned binding now support an
+offline bootstrap candidate; its full validation and attended recovery
+sequence are in [WATCHDOG-PLAN.md](WATCHDOG-PLAN.md). Clock timing, reset
+and mainline compatibility still require hardware confirmation. No DT
+change has been installed. Raw stock DTs remain outside Git.
+
+The subsequent watchdog candidate has now been written and completely read
+back on the owner's unit. Its cold boot, feed/magic-close test and actual
+timeout reset back to the checkpoint pass, with a changed boot ID and
+unchanged protected hashes. Host-lease renewal/disarm and RAM-only recovery
+now pass. Lease expiry led to normal overlay and data unmounts, read-only
+storage and an automatic reboot without ext4 journal replay. All 21 checks
+passed after the reboot. The first touch trial can use the proven recovery
+path while keeping display and GPU coldplug held.
+
+Offline display dependency review found a parameter-name trap in the pinned
+MSM module: `adreno_device.c` declares `module_param(skip_gpu, ...)`, while
+the adjacent description calls it `no_gpu`. The actual parameter for an
+initial display-only probe is `skip_gpu=1`; do not use `no_gpu=1`. This
+suppresses Adreno platform-driver registration and is only an isolation
+step, not a replacement for later GPU and full desktop validation.
+The FT8201 panel probe also requests its reset GPIO as output-high before
+attaching to DSI. Module insertion can therefore affect the visible screen
+even before a modeset; announce it and arm the recovery mechanism first.
+These are source findings, not successful device probes. Keep normal
+coldplug held and inspect the actual selected panel node before choosing
+the matching panel module.
+
+The installed configuration also lacks `CONFIG_REGULATOR_QCOM_LABIBB`.
+The selected panel's `vsp`/`vsn` supplies refer to those regulators, so the
+existing panel module alone cannot establish a complete display path.
+An unchanged pinned-source regulator module has been built in an isolated
+external-module directory against the exact installed output, with `W=1`;
+no module was installed or loaded. Its later PMIC probe requires refreshed
+protected backups/hashes, the completed recovery gate and a separate
+single-driver trial. Do not bypass regulator dependencies with dummy supplies.
+
+1. Inspect the pinned driver source, DT dependencies and module dependency
+   list offline. Do not infer this unit's touch variant from another unit.
+2. Establish the watchdog gate before loading a new hardware driver. The
+   project stage tools' `--watchdog` uses a real watchdog device. The current
+   attended candidate provides the verified Qualcomm watchdog, loaded
+   explicitly before a trial. Use the bounded lease and exitrd recovery
+   procedure in [WATCHDOG-PLAN.md](WATCHDOG-PLAN.md).
+3. Prepare a host log stream, a bounded single-driver operation and a
+   verified dead-man recovery for any step that could cut USB. Preserve
+   the current boot slice and host checkpoint as recovery. A userspace
+   timer alone does not recover a fully hung kernel.
+4. Announce screen changes before an attended display test. Start with
+   one display or touch change, inspect logs and prove a fresh USB command
+   roundtrip. Only a later gate may start the compositor or test OTG.
+
+Expect/Pass: reviewed driver dependencies and a tested recovery mechanism
+for the selected probe. Stop: no watchdog/recovery, missing logs, new I/O
+errors, guard failure, loss of USB or an unexpected driver binding.
+Rollback: no device change during preparation; later driver trials need
+their own explicit undo and the owner's physical recovery path. Avoid
+DPMS off and suspend; retain the disabled camera and VCNL4200 policy.

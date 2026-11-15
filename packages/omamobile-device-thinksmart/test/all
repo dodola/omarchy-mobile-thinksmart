@@ -16,6 +16,7 @@ done
 [[ ! -e $t/stage/usr/bin/omamobile-bootctl ]] || fail 'no bootctl'
 [[ ! -e $t/stage/usr/lib/firmware ]] || fail 'no firmware'
 [[ -f $t/stage/etc/pacman.d/omamobile-mirrorlist ]] || fail 'repository mirrorlist'
+[[ -f $t/stage/usr/lib/omamobile/thinksmart/keep-lock-display-on ]] || fail 'visible lock screen policy'
 cmp -s device.conf "$t/stage/usr/share/omamobile/device.conf" || fail 'installed device identity'
 grep -qx 'CODENAME=thinksmart' "$t/stage/usr/share/omamobile/device.conf" || fail 'ThinkSmart identity'
 if [[ -f ../../device/thinksmart/device.conf ]]; then

@@ -1,0 +1,96 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: MIT
+# Attended RAM-only exitrd for the pinned ThinkSmart persistent layout.
+# Installed as /run/initramfs/shutdown; systemd pivots here with PID 1.
+export PATH=/bin
+bb() { /bin/busybox "$@"; }
+say() {
+    echo "THINKSMART_EXITRD $*" > /dev/console
+    echo "<6>THINKSMART_EXITRD $*" > /dev/kmsg
+    if [ -c /dev/ttyGS0 ]; then echo "THINKSMART_EXITRD $*" > /dev/ttyGS0; fi
+}
+fail() {
+    say "STOP: $*; waiting for recovery"
+    if [ "${action:-}" = reboot ]; then
+        # Preserve the watchdog's chance to reset a failed shutdown. If it
+        # does not fire and PID 1 can still run, return to the held checkpoint
+        # after a bounded sync. This path never reports a clean unmount.
+        bb sleep 50
+        say 'clean teardown failed; requesting recovery reboot'
+        bb timeout -k 2 8 /bin/busybox sync
+        bb reboot -f
+    fi
+    while :; do bb sleep 1; done
+}
+
+# Refuse an accidental interactive invocation, before any storage action.
+[ "$$" = 1 ] || exit 64
+[ "$(bb uname -r)" = 6.19.5-thinksmart1-g770e10fa15a0 ] || fail 'wrong kernel'
+[ "$(bb tr '\000' '\n' < /sys/firmware/devicetree/base/compatible | bb head -n1)" = lenovo,cd-18781y ] || fail 'wrong board'
+case "$1" in reboot|poweroff|halt) action=$1 ;; *) fail 'unsupported action' ;; esac
+cd / || fail 'cannot enter RAM root'
+# Drop any inherited console descriptions tied to the old /dev mount.
+exec </dev/null >/dev/null 2>&1
+say 'entered RAM shutdown environment'
+
+# Staging binds the verified backing filesystem under /run/initramfs/data,
+# inside the subtree systemd preserves for exitrd. The original mount may
+# already be gone; OverlayFS holds independent references to its layers.
+[ "$(bb cat /sys/class/block/dm-0/dm/name)" = thinksmart-overlay ] || fail 'wrong mapper'
+bb awk '$2=="/oldroot" && $3=="overlay" {ok=1} END {exit !ok}' /proc/mounts || fail 'wrong old root'
+device=$(bb cat /sys/class/block/dm-0/dev) || fail 'missing mapper device number'
+[ "$device" = 253:0 ] || fail 'wrong mapper device number'
+bb awk -v dev="$device" '
+    $5=="/data" && $3==dev && $4=="/" && / - ext4 / { protected_mount++ }
+    $3==dev && $5!="/data" && index($5,"/oldroot/")!=1 { unexpected=1 }
+    END { exit !(protected_mount==1 && !unexpected) }
+' /proc/self/mountinfo || fail 'expected the verified ext4 backing mount at /data'
+say 'verified preserved ext4 backing mount'
+bb sync || fail 'sync before root detach'
+
+# Only the old root subtree is considered. A console can pin the old
+# devtmpfs mount even after systemd has bound it into this RAM root.
+bb awk '$2=="/oldroot" || index($2,"/oldroot/")==1 {print length($2),$2}' /proc/mounts | bb sort -rn > /oldroot-mounts
+while read -r length target; do
+    case "$target" in /oldroot|/oldroot/*) ;; *) fail 'unexpected mount target' ;; esac
+    if ! bb umount "$target"; then
+        [ "$target" = /oldroot/dev ] || fail "unmount $target"
+        bb awk '
+            $4=="/" && / - devtmpfs / && $5=="/dev" { current=$3 }
+            $4=="/" && / - devtmpfs / && $5=="/oldroot/dev" { old=$3; count++ }
+            index($5,"/oldroot/dev/")==1 { descendants++ }
+            END { exit !(current!="" && old==current && count==1 && !descendants) }
+        ' /proc/self/mountinfo || fail 'old /dev is not a duplicate devtmpfs'
+        bb umount -l "$target" || fail 'detach duplicate devtmpfs'
+        say 'detached duplicate old devtmpfs'
+    fi
+done < /oldroot-mounts
+bb awk '$3=="overlay" {bad=1} END {exit bad}' /proc/mounts || fail 'overlay still mounted'
+say 'old root detached'
+
+# systemd may already have remounted the data superblock read-only. Verify
+# the existing marker without reopening it for writes or undoing protection.
+marker=/data/upper/var/lib/omamobile/bringup-persistence/exitrd-clean-pending
+[ -f "$marker" ] && [ ! -L "$marker" ] || fail 'missing trial marker'
+[ "$(bb cat "$marker")" = EXITRD_TRIAL_PENDING ] || fail 'wrong trial marker'
+say 'persistent marker verified'
+bb sync || fail 'final data sync'
+say 'persistent filesystem synced'
+bb umount /data || fail 'data unmount'
+say 'persistent filesystem unmounted'
+bb awk '$3=="ext4" || $3=="overlay" {bad=1} END {exit bad}' /proc/mounts || fail 'storage mount remains'
+bb blockdev --setro /dev/dm-0 || fail 'mapper protection'
+for entry in /sys/class/block/*; do
+    name=${entry##*/}
+    case "$name" in mmcblk*rpmb) continue ;; mmcblk*|loop*|dm-*) ;; *) continue ;; esac
+    [ "$(bb cat "$entry/ro")" = 1 ] || fail "writable block node $name"
+done
+say 'DATA_UNMOUNTED_ALL_STORAGE_READ_ONLY'
+# Give the serial gadget time to transmit its last record before reboot.
+bb sleep 1
+case "$action" in
+    reboot) bb reboot -f ;;
+    poweroff) bb poweroff -f ;;
+    halt) bb halt -f ;;
+esac
+fail 'final kernel action returned'

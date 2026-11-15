@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: BSD-3-Clause
+--- a/lk2nd/display/simplefb.c
++++ b/lk2nd/display/simplefb.c
+@@ -68,15 +68,33 @@
+ 	if (resmem_offset < 0)
+ 		return 0;
+ 
+-	// TODO: Probably want to check if the node already exists
++	/* Board DTs may already reserve the bootloader framebuffer. */
+ 	snprintf(tmp, sizeof(tmp), "cont-splash@%08x", (uint32_t)fb->base);
+-	offset = fdt_add_subnode(dtb, resmem_offset, tmp);
+-	if (offset < 0)
++	offset = fdt_subnode_offset(dtb, resmem_offset, tmp);
++	if (offset == -FDT_ERR_NOTFOUND) {
++		offset = fdt_add_subnode(dtb, resmem_offset, tmp);
++		if (offset < 0)
++			return 0;
++
++		ret = fdt_appendprop_addrrange(dtb, resmem_offset, offset, "reg",
++					       (uint32_t)fb->base, fb_size);
++		if (ret < 0)
++			return 0;
++	} else if (offset >= 0) {
++		uint32_t reserved_base, reserved_size;
++
++		ret = lkfdt_get_reg(dtb, resmem_offset, offset,
++				    &reserved_base, &reserved_size);
++		if (ret || reserved_base != (uint32_t)fb->base ||
++		    reserved_size < fb_size) {
++			dprintf(CRITICAL, "simplefb: Existing reservation cannot hold framebuffer\n");
++			return 0;
++		}
++		dprintf(INFO, "simplefb: Reusing framebuffer reservation at %#x\n",
++			(uint32_t)fb->base);
++	} else {
+ 		return 0;
+-
+-	ret = fdt_appendprop_addrrange(dtb, resmem_offset, offset, "reg", (uint32_t)fb->base, fb_size);
+-	if (ret < 0)
+-		return 0;
++	}
+ 
+ 	ret = fdt_setprop_empty(dtb, offset, "no-map");
+ 	if (ret < 0)
+@@ -168,6 +186,9 @@
+ 	if (ret < 0)
+ 		return 0;
+ 
++	dprintf(INFO, "simplefb: Published %ux%u framebuffer, %u bpp at %#x\n",
++		fb->width, fb->height, fb->bpp, (uint32_t)fb->base);
++
+ 	return 0;
+ }
+ DEV_TREE_UPDATE(lk2nd_simplefb_dt_update);

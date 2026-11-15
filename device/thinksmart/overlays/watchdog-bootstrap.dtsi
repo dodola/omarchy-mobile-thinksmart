@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Include only for the reviewed, host-controlled bootstrap candidate.
+// The qcom_wdt module must remain unloaded until host log capture is active.
+&thinksmart_watchdog {
+	status = "okay";
+};

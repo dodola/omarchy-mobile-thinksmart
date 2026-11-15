@@ -15,6 +15,10 @@ install -Dm644 device.conf "$destination/usr/share/omamobile/device.conf"
 install -Dm644 version "$destination/usr/share/omamobile/device-thinksmart/version"
 install -Dm644 LICENSE "$destination/usr/share/licenses/omamobile-device-thinksmart/LICENSE"
 # Masks are policy only; installation never starts or stops a service.
+# Omamobile firstboot owns account/timezone setup from the prepared config.
+# systemd-firstboot otherwise waits on a local TTY before USB setup can finish.
+install -d "$destination/etc/systemd/system"
+ln -s /dev/null "$destination/etc/systemd/system/systemd-firstboot.service"
 for unit in sleep suspend hibernate hybrid-sleep suspend-then-hibernate; do
   install -d "$destination/etc/systemd/system"
   ln -s /dev/null "$destination/etc/systemd/system/$unit.target"
